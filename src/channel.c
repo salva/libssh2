@@ -1747,26 +1747,17 @@ libssh2_channel_handle_extended_data(LIBSSH2_CHANNEL *channel,
     (void)libssh2_channel_handle_extended_data2(channel, ignore_mode);
 }
 
-
-
 /*
- * _libssh2_channel_read
+ * _libssh2_channel_read_queued
  *
- * Read data from a channel
+ * Reads data queued from the channel without doing any network
+ * interaction.
  *
- * It is important to not return 0 until the currently read channel is
- * complete. If we read stuff from the wire but it was no payload data to fill
- * in the buffer with, we MUST make sure to return LIBSSH2_ERROR_EAGAIN.
- *
- * The receive window must be maintained (enlarged) by the user of this
- * function.
  */
-ssize_t _libssh2_channel_read(LIBSSH2_CHANNEL *channel, int stream_id,
-                              char *buf, size_t buflen)
-{
+static ssize_t _libssh2_channel_read_queued(LIBSSH2_CHANNEL *channel, int stream_id,
+                                            char *buf, size_t buflen) {
     LIBSSH2_SESSION *session = channel->session;
     LIBSSH2_PACKET *packet, *next_packet;
-    int rc;
     size_t total = 0;
 
     _libssh2_debug(session, LIBSSH2_TRACE_CONN,
@@ -1774,34 +1765,6 @@ ssize_t _libssh2_channel_read(LIBSSH2_CHANNEL *channel, int stream_id,
                    "stream #%d",
                    (int) buflen, channel->local.id, channel->remote.id,
                    stream_id);
-
-    /* expand the receiving window first if it has become too narrow */
-    if( (channel->read_state == libssh2_NB_state_jump1) ||
-        (channel->remote.window_size < channel->remote.window_size_initial / 4 * 3 + buflen) ) {
-
-        uint32_t adjustment = channel->remote.window_size_initial + buflen - channel->remote.window_size;
-        if (adjustment < LIBSSH2_CHANNEL_MINADJUST)
-            adjustment = LIBSSH2_CHANNEL_MINADJUST;
-
-        /* the actual window adjusting may not finish so we need to deal with
-           this special state here */
-        channel->read_state = libssh2_NB_state_jump1;
-        rc = _libssh2_channel_receive_window_adjust(channel, adjustment,
-                                                    0, NULL);
-        if (rc)
-            return rc;
-
-        channel->read_state = libssh2_NB_state_idle;
-    }
-
-    /* Process all pending incoming packets. Tests prove that this way
-       produces faster transfers. */
-    do {
-        rc = _libssh2_transport_read(session);
-    } while (rc > 0);
-
-    if ((rc < 0) && (rc != LIBSSH2_ERROR_EAGAIN))
-        return _libssh2_error(session, rc, "transport read");
 
     for (packet = _libssh2_list_first(&session->packets);
          packet && (buflen > total);
@@ -1845,39 +1808,101 @@ ssize_t _libssh2_channel_read(LIBSSH2_CHANNEL *channel, int stream_id,
                     available = wanted;
                 }
 
-                _libssh2_debug(session, LIBSSH2_TRACE_CONN,
-                               "channel_read() got %d of data from %lu/%lu/%d",
-                               available, channel->local.id, channel->remote.id,
-                               stream_id);
-
                 total += available;
             }
         }
     }
 
-    if (total) {
-        channel->read_avail -= total;
-        channel->remote.window_size -= total;
-        return total;
+    _libssh2_debug(session, LIBSSH2_TRACE_CONN,
+                   "channel_read() got %d of data from %lu/%lu/%d",
+                   total, channel->local.id, channel->remote.id,
+                   stream_id);
+
+    channel->read_avail -= total;
+    channel->remote.window_size -= total;
+    return total;
+}
+
+/*
+ * _libssh2_channel_read
+ *
+ * Read data from a channel
+ *
+ * It is important to not return 0 until the currently read channel is
+ * complete. If we read stuff from the wire but it was no payload data to fill
+ * in the buffer with, we MUST make sure to return LIBSSH2_ERROR_EAGAIN.
+ *
+ * The receive window must be maintained (enlarged) by the user of this
+ * function.
+ */
+ssize_t _libssh2_channel_read(LIBSSH2_CHANNEL *channel, int stream_id,
+                              char *buf, size_t buflen)
+{
+    LIBSSH2_SESSION *session = channel->session;
+    int rc = 0;
+    size_t total = 0;
+
+    /* expand the receiving window first if it has become too narrow */
+    if( (channel->read_state == libssh2_NB_state_jump1) ||
+        (channel->remote.window_size < channel->remote.window_size_initial / 4 * 3 + buflen) ) {
+
+        uint32_t adjustment = channel->remote.window_size_initial + buflen - channel->remote.window_size;
+        if (adjustment < LIBSSH2_CHANNEL_MINADJUST)
+            adjustment = LIBSSH2_CHANNEL_MINADJUST;
+
+        /* the actual window adjusting may not finish so we need to deal with
+           this special state here */
+        channel->read_state = libssh2_NB_state_jump1;
+        rc = _libssh2_channel_receive_window_adjust(channel, adjustment,
+                                                    0, NULL);
+        if (rc)
+            return rc;
+
+        channel->read_state = libssh2_NB_state_idle;
     }
 
-    /* If the channel is already at EOF or even closed, we need to signal
-       that back. We may have gotten that info while draining the incoming
-       transport layer until EAGAIN so we must not be fooled by that
-       return code. */
-    if(channel->remote.eof || channel->remote.close)
-        return 0;
+    /* Skip looking for data in the network if an EOF packet has
+     * already arrived */
+    if (!channel->remote.eof) {
+        
+        /* First we try to read from the queued packets, though don't bother
+         * doing it if the available data is less than bufferlen */
+        if (channel->read_avail >= buflen) {
+            total = _libssh2_channel_read_queued(channel, stream_id, buf, buflen);
+
+            if (total == buflen)
+                return total;
+        }
+
+        /* There wasn't enough data on the queued packets; go to the
+         * network looking for more */
+        do {
+            rc = _libssh2_transport_read(session);
+            _libssh2_debug(session, LIBSSH2_TRACE_CONN,
+                           "_libssh2_transport_read rc: %d", rc);
+        } while (rc >= 0);
+    }
+    
+    total += _libssh2_channel_read_queued(channel, stream_id, buf + total, buflen - total);
+
+    /* Once an EOF has arrived and all the data is drained, 0 is
+       returned to the caller signaling the EOF condition */
+    if (total || channel->remote.eof)
+        return total;
 
     /* If the transport layer said EAGAIN then we say so as well.
        If there wasn't any error, it means the transport layer got
        new data but it went to some other place and so we return
        EAGAIN too. */
-    if((rc == LIBSSH2_ERROR_EAGAIN) || (rc == LIBSSH2_ERROR_NONE))
-        return _libssh2_error(session, LIBSSH2_ERROR_EAGAIN, "would block");
 
-    /* should never happen */
-    _libssh2_debug(session, LIBSSH2_TRACE_CONN, "Internal error: bad code path reached (%d)", rc);
-    return rc;
+    /*  // this breaks sftp code, there is a bug there!
+        if ((rc == 0) || (rc == LIBSSH2_ERROR_EAGAIN))
+            return LIBSSH2_ERROR_EAGAIN; */
+
+    if (rc == 0)
+        rc = LIBSSH2_ERROR_EAGAIN;
+
+    return _libssh2_error(session, rc, "transport read");
 }
 
 /*
@@ -2187,25 +2212,11 @@ LIBSSH2_API int
 libssh2_channel_eof(LIBSSH2_CHANNEL * channel)
 {
     LIBSSH2_SESSION *session;
-    LIBSSH2_PACKET *packet;
 
     if(!channel)
         return LIBSSH2_ERROR_BAD_USE;
 
-    session = channel->session;
-    packet = _libssh2_list_first(&session->packets);
-
-    while (packet) {
-        if (((packet->data[0] == SSH_MSG_CHANNEL_DATA)
-             || (packet->data[0] == SSH_MSG_CHANNEL_EXTENDED_DATA))
-            && (channel->local.id == _libssh2_ntohu32(packet->data + 1))) {
-            /* There's data waiting to be read yet, mask the EOF status */
-            return 0;
-        }
-        packet = _libssh2_list_next(&packet->node);
-    }
-
-    return channel->remote.eof;
+    return (!channel->read_avail && channel->remote.eof);
 }
 
 /*
