@@ -304,8 +304,12 @@ sftp_packet_read(LIBSSH2_SFTP *sftp)
         int rc = _libssh2_channel_read(channel, 0,
                                        (char *)sftp->size_buffer + partial_len,
                                        4 - partial_len);
-        if (rc < 0)
+        if (rc <= 0) {
+            if (rc == 0)
+                return _libssh2_error(session, LIBSSH2_ERROR_CHANNEL_CLOSED,
+                                      "Remote end closed the channel");
             return rc;
+        }
 
         partial_len += rc;
         sftp->partial_len = partial_len;
@@ -335,10 +339,14 @@ sftp_packet_read(LIBSSH2_SFTP *sftp)
     if (partial_load_len < packet_size) {
         rc = _libssh2_channel_read(channel, 0, packet + partial_load_len, packet_size - partial_load_len);
 
-        if (rc < 0) {
+        if (rc <= 0) {
             if (rc != LIBSSH2_ERROR_EAGAIN) {
                 LIBSSH2_FREE(session, packet);
                 sftp->partial_packet = NULL;
+
+                if (rc == 0)
+                    return _libssh2_error(session, LIBSSH2_ERROR_CHANNEL_CLOSED,
+                                          "Remote end closed the channel");
             }
             return rc;
         }
