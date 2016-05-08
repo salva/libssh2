@@ -1301,8 +1301,7 @@ static ssize_t sftp_read(LIBSSH2_SFTP_HANDLE * handle, char *buffer,
                    allows, expand it! */
 
                 rc = _libssh2_channel_receive_window_adjust(sftp->channel,
-                                                            max_read_ahead*8,
-                                                            1, NULL);
+                                                            max_read_ahead, 1, NULL);
                 /* if this returns EAGAIN, we will get back to this function
                    at next call */
                 assert(rc != LIBSSH2_ERROR_EAGAIN || !filep->data_left);
