@@ -154,6 +154,9 @@ _libssh2_channel_open(LIBSSH2_SESSION * session, const char *channel_type,
         memset(&session->open_packet_requirev_state, 0,
                sizeof(session->open_packet_requirev_state));
 
+        if (window_size < LIBSSH2_CHANNEL_WINDOW_MIN)
+            window_size = LIBSSH2_CHANNEL_WINDOW_MIN;
+
         _libssh2_debug(session, LIBSSH2_TRACE_CONN,
                        "Opening Channel - win %d pack %d", window_size,
                        packet_size);
