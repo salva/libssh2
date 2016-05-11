@@ -1846,6 +1846,13 @@ ssize_t _libssh2_channel_read(LIBSSH2_CHANNEL *channel, int stream_id,
     if(channel->remote.eof)
         return 0;
 
+    /* The remote receive window has been exhausted, unread data for
+     * another stream is blocking us */
+    if ((channel->read_avail == channel->remote.window_size) &&
+        session->api_block_mode)
+        return _libssh2_error(session, LIBSSH2_ERROR_BUFFER_TOO_SMALL,
+                              "Receiving channel window has been exhausted");
+
     /* If the transport layer said EAGAIN then we say so as well.
        If there wasn't any error, it means the transport layer got
        new data but it went to some other place and so we return
