@@ -2206,76 +2206,59 @@ int _libssh2_channel_close(LIBSSH2_CHANNEL * channel)
     LIBSSH2_SESSION *session = channel->session;
     int rc = 0;
 
-    if (channel->local.close) {
-        /* Already closed, act like we sent another close,
-         * even though we didn't... shhhhhh */
-        channel->close_state = libssh2_NB_state_idle;
-        return 0;
-    }
-
-    if (!channel->local.eof) {
-        if ((rc = channel_send_eof(channel))) {
-            if (rc == LIBSSH2_ERROR_EAGAIN) {
-                return rc;
-            }
-            _libssh2_error(session, rc,
-                "Unable to send EOF, but closing channel anyway");
-        }
-    }
-
-    /* ignore if we have received a remote eof or not, as it is now too
-       late for us to wait for it. Continue closing! */
-
-    if (channel->close_state == libssh2_NB_state_idle) {
+    switch (channel->close_state) {
+    case libssh2_NB_state_idle:
         _libssh2_debug(session, LIBSSH2_TRACE_CONN, "Closing channel %lu/%lu",
                        channel->local.id, channel->remote.id);
+
+        if (!channel->local.eof) {
+            rc = channel_send_eof(channel);
+            if (rc < 0) {
+                if (rc == LIBSSH2_ERROR_EAGAIN)
+                    return rc;
+                return _libssh2_error(session, rc,
+                                      "Unable to send EOF, but closing channel anyway");
+            }
+        }
 
         channel->close_packet[0] = SSH_MSG_CHANNEL_CLOSE;
         _libssh2_htonu32(channel->close_packet + 1, channel->remote.id);
 
         channel->close_state = libssh2_NB_state_created;
-    }
 
-    if (channel->close_state == libssh2_NB_state_created) {
+    case libssh2_NB_state_created:
+
         rc = _libssh2_transport_send(session, channel->close_packet, 5,
                                      NULL, 0);
-        if (rc == LIBSSH2_ERROR_EAGAIN) {
-            _libssh2_error(session, rc,
-                           "Would block sending close-channel");
-            return rc;
+        if (rc < 0) {
+            if (rc == LIBSSH2_ERROR_EAGAIN)
+                return rc;
+            return _libssh2_error(session, rc,
+                                  "Unable to send close-channel request");
+        }
+        channel->close_state = libssh2_NB_state_sent;
 
-        } else if (rc) {
-            _libssh2_error(session, rc,
-                           "Unable to send close-channel request, "
-                           "but closing anyway");
-            /* skip waiting for the response and fall through to
-               LIBSSH2_CHANNEL_CLOSE below */
-
-        } else
-            channel->close_state = libssh2_NB_state_sent;
-    }
-
-    if (channel->close_state == libssh2_NB_state_sent) {
-        /* We must wait for the remote SSH_MSG_CHANNEL_CLOSE message */
-
+    case libssh2_NB_state_sent:
+        /* Wait for the remote SSH_MSG_CHANNEL_CLOSE message */
         rc = _libssh2_transport_read_all(session);
 
-        if ((rc == LIBSSH2_ERROR_EAGAIN) && !channel->remote.close)
-            return rc;
+        if (!channel->remote.close && (rc < 0)) {
+            if (rc == LIBSSH2_ERROR_EAGAIN)
+                return rc;
+            return _libssh2_error(session, rc,
+                                  "Unable to get close-channel response");
+        }
+
+        channel->local.close = 1;
+        channel->close_state = libssh2_NB_state_end;
+
+        if (channel->close_cb)
+            LIBSSH2_CHANNEL_CLOSE(session, channel);
+
+    default:
+    case libssh2_NB_state_end:
+        return 0;
     }
-
-    /* At this point either channel->remote.close is set or we got a
-       fatal error so we set the local close state */
-    channel->local.close = 1;
-    channel->close_state = libssh2_NB_state_idle;
-
-    /* And finally we invoke the callback */
-    if (channel->close_cb) {
-        LIBSSH2_CHANNEL_CLOSE(session, channel);
-    }
-
-    /* return 0 or an error */
-    return (channel->remote.close ? 0 : rc);
 }
 
 /*
