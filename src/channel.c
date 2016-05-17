@@ -724,11 +724,7 @@ libssh2_channel_forward_cancel(LIBSSH2_LISTENER *listener)
 static LIBSSH2_CHANNEL *
 channel_forward_accept(LIBSSH2_LISTENER *listener)
 {
-    int rc;
-
-    do {
-        rc = _libssh2_transport_read(listener->session);
-    } while (rc > 0);
+    int rc = _libssh2_transport_read_all(listener->session);
 
     if (_libssh2_list_first(&listener->queue)) {
         LIBSSH2_CHANNEL *channel = _libssh2_list_first(&listener->queue);
@@ -1796,9 +1792,7 @@ ssize_t _libssh2_channel_read(LIBSSH2_CHANNEL *channel, int stream_id,
 
     /* Process all pending incoming packets. Tests prove that this way
        produces faster transfers. */
-    do {
-        rc = _libssh2_transport_read(session);
-    } while (rc > 0);
+    rc = _libssh2_transport_read_all(session);
 
     /* Even if we get a fatal error, there may be data queued on the
      * packet list, so we look for it before checking rc for errors */
@@ -1857,7 +1851,7 @@ ssize_t _libssh2_channel_read(LIBSSH2_CHANNEL *channel, int stream_id,
        If there wasn't any error, it means the transport layer got
        new data but it went to some other place and so we return
        EAGAIN too. */
-    if((rc == LIBSSH2_ERROR_EAGAIN) || (rc == LIBSSH2_ERROR_NONE))
+    if(rc == LIBSSH2_ERROR_EAGAIN)
         return _libssh2_error(session, LIBSSH2_ERROR_EAGAIN, "would block");
 
     return _libssh2_error(session, rc, "transport read");
@@ -1962,11 +1956,9 @@ _libssh2_channel_write(LIBSSH2_CHANNEL *channel, int stream_id,
 
         /* drain the incoming flow first, mostly to make sure we get all
          * pending window adjust packets */
-        do
-            rc = _libssh2_transport_read(session);
-        while (rc > 0);
+        rc = _libssh2_transport_read_all(session);
 
-        if((rc < 0) && (rc != LIBSSH2_ERROR_EAGAIN)) {
+        if(rc != LIBSSH2_ERROR_EAGAIN) {
             return _libssh2_error(channel->session, rc,
                                   "Failure while draining incoming flow");
         }
@@ -1980,7 +1972,7 @@ _libssh2_channel_write(LIBSSH2_CHANNEL *channel, int stream_id,
              */
             session->socket_block_directions = LIBSSH2_SESSION_BLOCK_INBOUND;
 
-            return (rc==LIBSSH2_ERROR_EAGAIN?rc:0);
+            return LIBSSH2_ERROR_EAGAIN;
         }
 
         channel->write_bufwrite = buflen;
@@ -2277,27 +2269,24 @@ int _libssh2_channel_close(LIBSSH2_CHANNEL * channel)
     if (channel->close_state == libssh2_NB_state_sent) {
         /* We must wait for the remote SSH_MSG_CHANNEL_CLOSE message */
 
-        while (!channel->remote.close && !rc &&
-               (session->socket_state != LIBSSH2_SOCKET_DISCONNECTED))
-            rc = _libssh2_transport_read(session);
+        rc = _libssh2_transport_read_all(session);
+
+        if ((rc == LIBSSH2_ERROR_EAGAIN) && !channel->remote.close)
+            return rc;
     }
 
-    if(rc != LIBSSH2_ERROR_EAGAIN) {
-        /* set the local close state first when we're perfectly confirmed to not
-           do any more EAGAINs */
-        channel->local.close = 1;
+    /* At this point either channel->remote.close is set or we got a
+       fatal error so we set the local close state */
+    channel->local.close = 1;
+    channel->close_state = libssh2_NB_state_idle;
 
-        /* We call the callback last in this function to make it keep the local
-           data as long as EAGAIN is returned. */
-        if (channel->close_cb) {
-            LIBSSH2_CHANNEL_CLOSE(session, channel);
-        }
-
-        channel->close_state = libssh2_NB_state_idle;
+    /* And finally we invoke the callback */
+    if (channel->close_cb) {
+        LIBSSH2_CHANNEL_CLOSE(session, channel);
     }
 
     /* return 0 or an error */
-    return rc>=0?0:rc;
+    return (channel->remote.close ? 0 : rc);
 }
 
 /*
@@ -2346,13 +2335,8 @@ static int channel_wait_closed(LIBSSH2_CHANNEL *channel)
      * Either the channel will be closed or network timeout will occur.
      */
     if (!channel->remote.close) {
-        do {
-            rc = _libssh2_transport_read(session);
-            if (channel->remote.close)
-                /* it is now closed, move on! */
-                break;
-        } while (rc > 0);
-        if(rc < 0)
+        rc = _libssh2_transport_read_all(session);
+        if (!channel->remote.close)
             return rc;
     }
 

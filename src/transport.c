@@ -254,7 +254,6 @@ fullpacket(LIBSSH2_SESSION * session, int encrypted /* 1 or 0 */ )
     return session->fullpacket_packet_type;
 }
 
-
 /*
  * _libssh2_transport_read
  *
@@ -590,6 +589,29 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
     } while (1);                /* loop */
 
     return LIBSSH2_ERROR_SOCKET_RECV; /* we never reach this point */
+}
+
+/*
+ * _libssh2_transport_read_all
+ *
+ * Collect all the packets available from the network without blocking
+ * into the input queue.
+ *
+ * Returns the error code that made the function stop reading packets
+ * (guaranteed to be a less than 0 number)
+ *
+ * DOES NOT call _libssh2_error() for ANY error case.
+ */
+int
+_libssh2_transport_read_all(LIBSSH2_SESSION *session)
+{
+    while (1) {
+        int rc = _libssh2_transport_read(session);
+        if (rc == 0)
+            return LIBSSH2_ERROR_EAGAIN;
+        if (rc < 0)
+            return rc;
+    }
 }
 
 static int
