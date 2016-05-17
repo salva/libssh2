@@ -2157,42 +2157,31 @@ static int channel_wait_eof(LIBSSH2_CHANNEL *channel)
     LIBSSH2_SESSION *session = channel->session;
     int rc;
 
-    if (channel->wait_eof_state == libssh2_NB_state_idle) {
+    switch (channel->wait_eof_state) {
+    case libssh2_NB_state_idle:
         _libssh2_debug(session, LIBSSH2_TRACE_CONN,
                        "Awaiting EOF for channel %lu/%lu", channel->local.id,
                        channel->remote.id);
 
         channel->wait_eof_state = libssh2_NB_state_created;
-    }
 
-    /*
-     * While channel is not eof, read more packets from the network.
-     * Either the EOF will be set or network timeout will occur.
-     */
-    do {
-        if (channel->remote.eof) {
-            break;
-        }
-
-        if ((channel->remote.window_size == channel->read_avail) &&
-            session->api_block_mode)
-            return _libssh2_error(session, LIBSSH2_ERROR_CHANNEL_WINDOW_FULL,
-                                  "Receiving channel window has been exhausted");
-
-        rc = _libssh2_transport_read(session);
-        if (rc == LIBSSH2_ERROR_EAGAIN) {
+    case libssh2_NB_state_created:
+        rc = _libssh2_transport_read_all(session);
+        if (!channel->remote.eof) {
+            if ((channel->remote.window_size == channel->read_avail) &&
+                session->api_block_mode)
+                return _libssh2_error(session, LIBSSH2_ERROR_CHANNEL_WINDOW_FULL,
+                                      "Receiving channel window has been exhausted");
             return rc;
         }
-        else if (rc < 0) {
-            channel->wait_eof_state = libssh2_NB_state_idle;
-            return _libssh2_error(session, rc,
-                                  "_libssh2_transport_read() bailed out!");
-        }
-    } while (1);
 
-    channel->wait_eof_state = libssh2_NB_state_idle;
+        channel->wait_eof_state = libssh2_NB_state_end;
 
-    return 0;
+    default: /* avoid warning */
+
+    case libssh2_NB_state_end:
+        return 0;
+    }
 }
 
 /*
@@ -2340,8 +2329,7 @@ static int channel_wait_closed(LIBSSH2_CHANNEL *channel)
 
         channel->wait_closed_state = libssh2_NB_state_end;
 
-    default:
-        /* avoid warning */
+    default: /* avoid warning */
 
     case libssh2_NB_state_end:
         return 0;
