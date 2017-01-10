@@ -628,35 +628,17 @@ int _libssh2_transport_send_ready(LIBSSH2_SESSION *session)
 }
 
 static int
-send_existing(LIBSSH2_SESSION *session, const unsigned char *data,
-              size_t data_len, ssize_t *ret)
+send_existing(LIBSSH2_SESSION *session)
 {
     ssize_t rc;
     ssize_t length;
     struct transportpacket *p = &session->packet;
 
-    if (!p->olen) {
-        *ret = 0;
-        return LIBSSH2_ERROR_NONE;
-    }
-
-    /* send as much as possible of the existing packet */
-    if ((data != p->odata) || (data_len != p->olen)) {
-        /* When we are about to complete the sending of a packet, it is vital
-           that the caller doesn't try to send a new/different packet since
-           we don't add this one up until the previous one has been sent. To
-           make the caller really notice his/hers flaw, we return error for
-           this case */
-        return LIBSSH2_ERROR_BAD_USE;
-    }
-
-    *ret = 1;                   /* set to make our parent return */
-
     /* number of bytes left to send */
     length = p->ototal_num - p->osent;
 
     rc = LIBSSH2_SEND(session, &p->outbuf[p->osent], length,
-                       LIBSSH2_SOCKET_SEND_FLAGS(session));
+                      LIBSSH2_SOCKET_SEND_FLAGS(session));
     if (rc < 0)
         _libssh2_debug(session, LIBSSH2_TRACE_SOCKET,
                        "Error sending %d bytes: %d", length, -rc);
@@ -668,15 +650,16 @@ send_existing(LIBSSH2_SESSION *session, const unsigned char *data,
                   &p->outbuf[p->osent], rc);
     }
 
-    if (rc == length) {
+    if (rc >= length) {
         /* the remainder of the package was sent */
         p->ototal_num = 0;
         p->olen = 0;
+        p->odata = NULL;
         /* we leave *ret set so that the parent returns as we MUST return back
            a send success now, so that we don't risk sending EAGAIN later
            which then would confuse the parent function */
+        session->socket_block_directions &= ~LIBSSH2_SESSION_BLOCK_OUTBOUND;
         return LIBSSH2_ERROR_NONE;
-
     }
     else if (rc < 0) {
         /* nothing was sent */
@@ -687,13 +670,12 @@ send_existing(LIBSSH2_SESSION *session, const unsigned char *data,
             return LIBSSH2_ERROR_SOCKET_SEND;
         }
 
-        session->socket_block_directions |= LIBSSH2_SESSION_BLOCK_OUTBOUND;
-        return LIBSSH2_ERROR_EAGAIN;
     }
+    else
+        p->osent += rc;         /* we sent away this much data */
 
-    p->osent += rc;         /* we sent away this much data */
-
-    return rc < length ? LIBSSH2_ERROR_EAGAIN : LIBSSH2_ERROR_NONE;
+    session->socket_block_directions |= LIBSSH2_SESSION_BLOCK_OUTBOUND;
+    return LIBSSH2_ERROR_EAGAIN;
 }
 
 /*
@@ -731,7 +713,6 @@ int _libssh2_transport_send(LIBSSH2_SESSION *session,
     struct transportpacket *p = &session->packet;
     int encrypted;
     int compressed;
-    ssize_t ret;
     int rc;
     const unsigned char *orgdata = data;
     size_t orgdata_len = data_len;
@@ -758,17 +739,20 @@ int _libssh2_transport_send(LIBSSH2_SESSION *session,
     if(data2)
         debugdump(session, "libssh2_transport_write plain2", data2, data2_len);
 
-    /* FIRST, check if we have a pending write to complete. send_existing
-       only sanity-check data and data_len and not data2 and data2_len!! */
-    rc = send_existing(session, data, data_len, &ret);
-    if (rc)
-        return rc;
+    /* Check if we have a pending write to complete */
+    if (p->olen) {
+        /* When we are about to complete the sending of a packet, it is vital
+           that the caller doesn't try to send a new/different packet since
+           we don't add this one up until the previous one has been sent. To
+           make the caller really notice his/hers flaw, we return error for
+           this case.
+           Only sanity-check data and data_len and not data2 and data2_len!!
+        */
+        if ((data != p->odata) || (data_len != p->olen))
+            return LIBSSH2_ERROR_BAD_USE;
 
-    session->socket_block_directions &= ~LIBSSH2_SESSION_BLOCK_OUTBOUND;
-
-    if (ret)
-        /* set by send_existing if data was sent */
-        return rc;
+        return send_existing(session);
+    }
 
     encrypted = (session->state & LIBSSH2_STATE_NEWKEYS) ? 1 : 0;
 
@@ -896,34 +880,10 @@ int _libssh2_transport_send(LIBSSH2_SESSION *session,
     }
 
     session->local.seqno++;
+    p->odata = orgdata;
+    p->olen = orgdata_len;
+    p->osent = 0;
+    p->ototal_num = total_length;
 
-    ret = LIBSSH2_SEND(session, p->outbuf, total_length,
-                        LIBSSH2_SOCKET_SEND_FLAGS(session));
-    if (ret < 0)
-        _libssh2_debug(session, LIBSSH2_TRACE_SOCKET,
-                       "Error sending %d bytes: %d", total_length, -ret);
-    else {
-        _libssh2_debug(session, LIBSSH2_TRACE_SOCKET, "Sent %d/%d bytes at %p",
-                       ret, total_length, p->outbuf);
-        debugdump(session, "libssh2_transport_write send()", p->outbuf, ret);
-    }
-
-    if (ret != total_length) {
-        if (ret >= 0 || ret == -EAGAIN) {
-            /* the whole packet could not be sent, save the rest */
-            session->socket_block_directions |= LIBSSH2_SESSION_BLOCK_OUTBOUND;
-            p->odata = orgdata;
-            p->olen = orgdata_len;
-            p->osent = ret <= 0 ? 0 : ret;
-            p->ototal_num = total_length;
-            return LIBSSH2_ERROR_EAGAIN;
-        }
-        return LIBSSH2_ERROR_SOCKET_SEND;
-    }
-
-    /* the whole thing got sent away */
-    p->odata = NULL;
-    p->olen = 0;
-
-    return LIBSSH2_ERROR_NONE;         /* all is good */
+    return send_existing(session);
 }
