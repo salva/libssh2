@@ -630,50 +630,38 @@ int _libssh2_transport_send_ready(LIBSSH2_SESSION *session)
 static int
 send_existing(LIBSSH2_SESSION *session)
 {
-    ssize_t rc;
-    ssize_t length;
     struct transportpacket *p = &session->packet;
+    ssize_t length = p->ototal_num - p->osent;
+    ssize_t rc = LIBSSH2_SEND(session, &p->outbuf[p->osent],
+                              length,
+                              LIBSSH2_SOCKET_SEND_FLAGS(session));
 
-    /* number of bytes left to send */
-    length = p->ototal_num - p->osent;
-
-    rc = LIBSSH2_SEND(session, &p->outbuf[p->osent], length,
-                      LIBSSH2_SOCKET_SEND_FLAGS(session));
-    if (rc < 0)
+    if (rc < 0) {
         _libssh2_debug(session, LIBSSH2_TRACE_SOCKET,
-                       "Error sending %d bytes: %d", length, -rc);
-    else {
-        _libssh2_debug(session, LIBSSH2_TRACE_SOCKET,
-                       "Sent %d/%d bytes at %p+%d", rc, length, p->outbuf,
-                       p->osent);
-        debugdump(session, "libssh2_transport_write send()",
-                  &p->outbuf[p->osent], rc);
-    }
-
-    if (rc >= length) {
-        /* the remainder of the package was sent */
-        p->ototal_num = 0;
-        p->olen = 0;
-        p->odata = NULL;
-        /* we leave *ret set so that the parent returns as we MUST return back
-           a send success now, so that we don't risk sending EAGAIN later
-           which then would confuse the parent function */
-        session->socket_block_directions &= ~LIBSSH2_SESSION_BLOCK_OUTBOUND;
-        return LIBSSH2_ERROR_NONE;
-    }
-    else if (rc < 0) {
+                       "Error sending %d bytes, errno: %d", length, -rc);
         /* nothing was sent */
         if (rc != -EAGAIN && rc != -EINTR) {
             /* It was a fatal error, mark the socket as disconnected */
             session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
-            /* send failure! */
             return LIBSSH2_ERROR_SOCKET_SEND;
         }
-
     }
-    else
-        p->osent += rc;         /* we sent away this much data */
+    else {
+        _libssh2_debug(session, LIBSSH2_TRACE_SOCKET,
+                       "Sent %d/%d bytes at %p+%d", rc, length, p->outbuf, p->osent);
+        debugdump(session, "libssh2_transport_write send()",
+                  &p->outbuf[p->osent], rc);
 
+        p->osent += rc; /* we sent away this much data */
+        if  (rc >= length) {
+            /* the remainder of the package was sent */
+            p->ototal_num = 0;
+            p->olen = 0;
+            p->odata = NULL;
+            session->socket_block_directions &= ~LIBSSH2_SESSION_BLOCK_OUTBOUND;
+            return LIBSSH2_ERROR_NONE;
+        }
+    }
     session->socket_block_directions |= LIBSSH2_SESSION_BLOCK_OUTBOUND;
     return LIBSSH2_ERROR_EAGAIN;
 }
