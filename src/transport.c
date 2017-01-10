@@ -373,11 +373,12 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             if (nread <= 0) {
                 /* check if this is due to EAGAIN and return the special
                    return code if so, error out normally otherwise */
-                if ((nread < 0) && (nread == -EAGAIN)) {
+                if ((nread < 0) && (nread == -EAGAIN || nread == -EINTR)) {
                     session->socket_block_directions |=
                         LIBSSH2_SESSION_BLOCK_INBOUND;
                     return LIBSSH2_ERROR_EAGAIN;
                 }
+                session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
                 _libssh2_debug(session, LIBSSH2_TRACE_SOCKET,
                                "Error recving %d bytes (got %d)",
                                PACKETBUFSIZE - remainbuf, -nread);
@@ -420,6 +421,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             if (encrypted) {
                 rc = decrypt(session, &p->buf[p->readidx], block, blocksize);
                 if (rc != LIBSSH2_ERROR_NONE) {
+                    session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
                     return rc;
                 }
                 /* save the first 5 bytes of the decrypted package, to be
@@ -438,8 +440,10 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
              * and we can extract packet and padding length from it
              */
             p->packet_length = _libssh2_ntohu32(block);
-            if (p->packet_length < 1)
+            if (p->packet_length < 1) {
+                session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
                 return LIBSSH2_ERROR_DECRYPT;
+            }
 
             p->padding_length = block[4];
 
@@ -458,6 +462,9 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
              * padding, and MAC.)."
              */
             if (total_num > LIBSSH2_PACKET_MAXPAYLOAD) {
+                _libssh2_debug(session, LIBSSH2_TRACE_SOCKET,
+                               "Packet too big received (%d bytes), dropping connection", total_num);
+                session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
                 return LIBSSH2_ERROR_OUT_OF_BOUNDARY;
             }
 
@@ -465,6 +472,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
                hold all data, including padding and MAC. */
             p->payload = LIBSSH2_ALLOC(session, total_num);
             if (!p->payload) {
+                session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
                 return LIBSSH2_ERROR_ALLOC;
             }
             p->total_num = total_num;
@@ -535,6 +543,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
                 p->total_num = 0;   /* no packet buffer available */
                 LIBSSH2_FREE(session, p->payload);
                 p->payload = NULL;
+                session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
                 return rc;
             }
 
@@ -762,8 +771,10 @@ int _libssh2_transport_send(LIBSSH2_SESSION *session,
                                        &p->outbuf[5], &dest_len,
                                        data, data_len,
                                        &session->local.comp_abstract);
-        if(rc)
+        if(rc) {
+            session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
             return rc;     /* compression failure */
+        }
 
         if(data2 && data2_len) {
             /* compress directly to the target buffer right after where the
@@ -777,8 +788,11 @@ int _libssh2_transport_send(LIBSSH2_SESSION *session,
         }
         else
             dest2_len = 0;
-        if(rc)
+
+        if(rc) {
+            session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
             return rc;     /* compression failure */
+        }
 
         data_len = dest_len + dest2_len; /* use the combined length */
     }
@@ -862,8 +876,10 @@ int _libssh2_transport_send(LIBSSH2_SESSION *session,
             unsigned char *ptr = &p->outbuf[i];
             if (session->local.crypt->crypt(session, ptr,
                                             session->local.crypt->blocksize,
-                                            &session->local.crypt_abstract))
+                                            &session->local.crypt_abstract)) {
+                session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
                 return LIBSSH2_ERROR_ENCRYPT;     /* encryption failure */
+            }
         }
     }
 
