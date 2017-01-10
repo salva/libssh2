@@ -680,9 +680,12 @@ send_existing(LIBSSH2_SESSION *session, const unsigned char *data,
     }
     else if (rc < 0) {
         /* nothing was sent */
-        if (rc != -EAGAIN)
+        if (rc != -EAGAIN && rc != -EINTR) {
+            /* It was a fatal error, mark the socket as disconnected */
+            session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
             /* send failure! */
             return LIBSSH2_ERROR_SOCKET_SEND;
+        }
 
         session->socket_block_directions |= LIBSSH2_SESSION_BLOCK_OUTBOUND;
         return LIBSSH2_ERROR_EAGAIN;
