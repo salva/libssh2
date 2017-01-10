@@ -110,11 +110,8 @@ int _libssh2_keepalive_send (LIBSSH2_SESSION *session,
     if (seconds_to_next)
         *seconds_to_next = session->keepalive_interval;
 
-    if (rc < 0) {
-        _libssh2_error(session, LIBSSH2_ERROR_SOCKET_SEND,
-                       "Unable to send keepalive message");
-        return rc;
-    }
+    if (rc < 0)
+        return _libssh2_error(session, rc, "Unable to send keepalive message");
 
     return 0;
 }
