@@ -255,6 +255,55 @@ fullpacket(LIBSSH2_SESSION * session, int encrypted /* 1 or 0 */ )
     return session->fullpacket_packet_type;
 }
 
+static int
+refill_read_buffer(LIBSSH2_SESSION * session, int required_len) {
+    ssize_t nread;
+    struct transportpacket *p = &session->packet;
+    int remaining = p->writeidx - p->readidx;
+    assert(remaining >= 0); /* if remaining turns negative we have a
+                             * bad internal error */
+
+    if (remaining >= required_len)
+        return remaining;
+
+    /* move any remainder to the start of the buffer so that we can do
+       a full refill */
+    if (remaining) {
+        memmove(p->buf, &p->buf[p->readidx], remaining);
+        p->readidx = 0;
+        p->writeidx = remaining;
+    } else {
+        /* nothing to move, just zero the indexes */
+        p->readidx = p->writeidx = 0;
+    }
+
+    /* now read a big chunk from the network into the temp buffer */
+    nread = LIBSSH2_RECV(session, &p->buf[remaining],
+                         PACKETBUFSIZE - remaining,
+                         LIBSSH2_SOCKET_RECV_FLAGS(session));
+    if (nread <= 0) {
+        /* check if this is due to EAGAIN and return the special
+           return code if so, error out normally otherwise */
+        if (nread == -EAGAIN || nread == -EINTR) {
+            session->socket_block_directions |=
+                LIBSSH2_SESSION_BLOCK_INBOUND;
+            return LIBSSH2_ERROR_EAGAIN;
+        }
+        session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
+        _libssh2_debug(session, LIBSSH2_TRACE_SOCKET,
+                       "Error recving %d bytes (got %d)",
+                       PACKETBUFSIZE - remaining, -nread);
+        return LIBSSH2_ERROR_SOCKET_RECV;
+    }
+    _libssh2_debug(session, LIBSSH2_TRACE_SOCKET,
+                   "Recved %d/%d bytes to %p+%d", nread,
+                   PACKETBUFSIZE - remaining, p->buf, remaining);
+    debugdump(session, "libssh2_transport_read() raw",
+              &p->buf[remaining], nread);
+
+    p->writeidx += nread; /* advance write pointer */
+    return p->writeidx - p->readidx;
+}
 
 /*
  * _libssh2_transport_read
@@ -275,7 +324,6 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
 {
     int rc;
     struct transportpacket *p = &session->packet;
-    int remainbuf;
     int remainpack;
     int numbytes;
     int numdecrypt;
@@ -341,64 +389,9 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
            buffer into the packet buffer so this temp one doesn't have
            to be able to keep a whole SSH packet, just be large enough
            so that we can read big chunks from the network layer. */
-
-        /* how much data there is remaining in the buffer to deal with
-           before we should read more from the network */
-        remainbuf = p->writeidx - p->readidx;
-
-        /* if remainbuf turns negative we have a bad internal error */
-        assert(remainbuf >= 0);
-
-        if (remainbuf < blocksize) {
-            /* If we have less than a blocksize left, it is too
-               little data to deal with, read more */
-            ssize_t nread;
-
-            /* move any remainder to the start of the buffer so
-               that we can do a full refill */
-            if (remainbuf) {
-                memmove(p->buf, &p->buf[p->readidx], remainbuf);
-                p->readidx = 0;
-                p->writeidx = remainbuf;
-            } else {
-                /* nothing to move, just zero the indexes */
-                p->readidx = p->writeidx = 0;
-            }
-
-            /* now read a big chunk from the network into the temp buffer */
-            nread =
-                LIBSSH2_RECV(session, &p->buf[remainbuf],
-                              PACKETBUFSIZE - remainbuf,
-                              LIBSSH2_SOCKET_RECV_FLAGS(session));
-            if (nread <= 0) {
-                /* check if this is due to EAGAIN and return the special
-                   return code if so, error out normally otherwise */
-                if (nread == -EAGAIN || nread == -EINTR) {
-                    session->socket_block_directions |=
-                        LIBSSH2_SESSION_BLOCK_INBOUND;
-                    return LIBSSH2_ERROR_EAGAIN;
-                }
-                session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
-                _libssh2_debug(session, LIBSSH2_TRACE_SOCKET,
-                               "Error recving %d bytes (got %d)",
-                               PACKETBUFSIZE - remainbuf, -nread);
-                return LIBSSH2_ERROR_SOCKET_RECV;
-            }
-            _libssh2_debug(session, LIBSSH2_TRACE_SOCKET,
-                           "Recved %d/%d bytes to %p+%d", nread,
-                           PACKETBUFSIZE - remainbuf, p->buf, remainbuf);
-
-            debugdump(session, "libssh2_transport_read() raw",
-                      &p->buf[remainbuf], nread);
-            /* advance write pointer */
-            p->writeidx += nread;
-
-            /* update remainbuf counter */
-            remainbuf = p->writeidx - p->readidx;
-        }
-
-        /* how much data to deal with from the buffer */
-        numbytes = remainbuf;
+        numbytes = refill_read_buffer(session, blocksize);
+        if (numbytes < 0)
+            return numbytes;
 
         if (!p->total_num) {
             /* no payload buffer should be allocated when total_num is 0: */
