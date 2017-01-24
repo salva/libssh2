@@ -373,7 +373,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             if (nread <= 0) {
                 /* check if this is due to EAGAIN and return the special
                    return code if so, error out normally otherwise */
-                if ((nread < 0) && (nread == -EAGAIN || nread == -EINTR)) {
+                if (nread == -EAGAIN || nread == -EINTR) {
                     session->socket_block_directions |=
                         LIBSSH2_SESSION_BLOCK_INBOUND;
                     return LIBSSH2_ERROR_EAGAIN;
