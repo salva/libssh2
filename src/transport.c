@@ -268,14 +268,9 @@ refill_read_buffer(LIBSSH2_SESSION * session, int required_len) {
 
     /* move any remainder to the start of the buffer so that we can do
        a full refill */
-    if (remaining) {
-        memmove(p->buf, &p->buf[p->readidx], remaining);
-        p->readidx = 0;
-        p->writeidx = remaining;
-    } else {
-        /* nothing to move, just zero the indexes */
-        p->readidx = p->writeidx = 0;
-    }
+    memmove(p->buf, &p->buf[p->readidx], remaining);
+    p->readidx = 0;
+    p->writeidx = remaining;
 
     /* now read a big chunk from the network into the temp buffer */
     nread = LIBSSH2_RECV(session, &p->buf[remaining],
