@@ -320,7 +320,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
     int rc;
     struct transportpacket *p = &session->packet;
     int remainpack;
-    int numbytes;
+    int buf_available;
     int numdecrypt;
     unsigned char block[MAX_BLOCKSIZE];
     int blocksize;
@@ -385,9 +385,9 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
            buffer into the packet buffer so this temp one doesn't have
            to be able to keep a whole SSH packet, just be large enough
            so that we can read big chunks from the network layer. */
-        numbytes = refill_read_buffer(session, blocksize);
-        if (numbytes < 0)
-            return numbytes;
+        buf_available = refill_read_buffer(session, blocksize);
+        if (buf_available < 0)
+            return buf_available;
 
         if (!p->total_num) {
             /* no payload buffer should be allocated when total_num is 0: */
@@ -397,7 +397,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
                size of this payload, we need to decrypt the first
                blocksize data. */
 
-            if (numbytes < blocksize) {
+            if (buf_available < blocksize) {
                 /* we can't act on anything less than blocksize, but this
                    check is only done for the initial block since once we have
                    got the start of a block we can in fact deal with fractions
@@ -466,31 +466,31 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             }
             p->total_num = total_num;
             /* init write pointer to start of payload buffer */
-            p->wptr = p->payload;
+            p->payload_wptr = p->payload;
 
             if (blocksize > 5) {
                 /* copy the data from index 5 to the end of
                    the blocksize from the temporary buffer to
                    the start of the decrypted buffer */
-                memcpy(p->wptr, &block[5], blocksize - 5);
-                p->wptr += blocksize - 5;       /* advance write pointer */
+                memcpy(p->payload_wptr, &block[5], blocksize - 5);
+                p->payload_wptr += blocksize - 5;       /* advance write pointer */
             }
 
             /* we already dealt with a blocksize worth of data */
-            numbytes -= blocksize;
+            buf_available -= blocksize;
         }
 
-        data_num = p->wptr - p->payload; /* number of bytes of the package read
+        data_num = p->payload_wptr - p->payload; /* number of bytes of the package read
                                           * so far */
 
         /* how much there is left to add to the current payload
            package */
         remainpack = p->total_num - data_num;
 
-        if (numbytes > remainpack) {
+        if (buf_available > remainpack) {
             /* if we have more data in the buffer than what is going into this
                particular packet, we limit this round to this packet only */
-            numbytes = remainpack;
+            buf_available = remainpack;
         }
 
         if (encrypted) {
@@ -500,14 +500,14 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
                since it is used for the hash later on. */
             int skip = session->remote.mac->mac_len;
 
-            /* if what we have plus numbytes is bigger than the
+            /* if what we have plus buf_available is bigger than the
                total minus the skip margin, we should lower the
                amount to decrypt even more */
-            if ((data_num + numbytes) > (p->total_num - skip)) {
+            if ((data_num + buf_available) > (p->total_num - skip)) {
                 numdecrypt = (p->total_num - skip) - data_num;
             } else {
                 int frac;
-                numdecrypt = numbytes;
+                numdecrypt = buf_available;
                 frac = numdecrypt % blocksize;
                 if (frac) {
                     /* not an aligned amount of blocks,
@@ -515,7 +515,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
                     numdecrypt -= frac;
                     /* and make it no unencrypted data
                        after it */
-                    numbytes = 0;
+                    buf_available = 0;
                 }
             }
         } else {
@@ -526,7 +526,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
         /* if there are bytes to decrypt, do that */
         if (numdecrypt > 0) {
             /* now decrypt the lot */
-            rc = decrypt(session, p->buf_rptr, p->wptr, numdecrypt);
+            rc = decrypt(session, p->buf_rptr, p->payload_wptr, numdecrypt);
             if (rc != LIBSSH2_ERROR_NONE) {
                 p->total_num = 0;   /* no packet buffer available */
                 LIBSSH2_FREE(session, p->payload);
@@ -538,27 +538,27 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             /* advance the read pointer */
             p->buf_rptr += numdecrypt;
             /* advance write pointer */
-            p->wptr += numdecrypt;
+            p->payload_wptr += numdecrypt;
 
             /* bytes left to take care of without decryption */
-            numbytes -= numdecrypt;
+            buf_available -= numdecrypt;
         }
 
         /* if there are bytes to copy that aren't decrypted, simply
            copy them as-is to the target buffer */
-        if (numbytes > 0) {
-            memcpy(p->wptr, p->buf_rptr, numbytes);
+        if (buf_available > 0) {
+            memcpy(p->payload_wptr, p->buf_rptr, buf_available);
 
-            /* advance the read pointer */
-            p->buf_rptr += numbytes;
-            /* advance write pointer */
-            p->wptr += numbytes;
+            /* advance the buffer read pointer */
+            p->buf_rptr += buf_available;
+            /* advance the payload write pointer */
+            p->payload_wptr += buf_available;
         }
 
 
         /* now check how much data there's left to read to finish the
            current packet */
-        data_num = p->wptr - p->payload; /* recalculate */
+        data_num = p->payload_wptr - p->payload; /* recalculate */
         remainpack = p->total_num - data_num;
 
         if (!remainpack) {

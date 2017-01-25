@@ -480,8 +480,8 @@ struct transportpacket
                                mac_length. */
     unsigned char *payload; /* this is a pointer to a LIBSSH2_ALLOC()
                                area to which we write decrypted data */
-    unsigned char *wptr;    /* write pointer into the payload to where we
-                               are currently writing decrypted data */
+    unsigned char *payload_wptr;/* write pointer into the payload to where we
+                                   are currently writing decrypted data */
 
     /* ------------- for outgoing data --------------- */
     unsigned char outbuf[MAX_SSH_PACKET_LEN]; /* area for the outgoing data */
