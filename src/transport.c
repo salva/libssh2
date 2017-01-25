@@ -326,6 +326,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
     int blocksize;
     int encrypted = 1;
     size_t total_num;
+    size_t data_num;
 
     /* default clear the bit */
     session->socket_block_directions &= ~LIBSSH2_SESSION_BLOCK_INBOUND;
@@ -475,17 +476,16 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
                 p->wptr += blocksize - 5;       /* advance write pointer */
             }
 
-            /* init the data_num field to the number of bytes of
-               the package read so far */
-            p->data_num = p->wptr - p->payload;
-
             /* we already dealt with a blocksize worth of data */
             numbytes -= blocksize;
         }
 
+        data_num = p->wptr - p->payload; /* number of bytes of the package read
+                                          * so far */
+
         /* how much there is left to add to the current payload
            package */
-        remainpack = p->total_num - p->data_num;
+        remainpack = p->total_num - data_num;
 
         if (numbytes > remainpack) {
             /* if we have more data in the buffer than what is going into this
@@ -503,8 +503,8 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             /* if what we have plus numbytes is bigger than the
                total minus the skip margin, we should lower the
                amount to decrypt even more */
-            if ((p->data_num + numbytes) > (p->total_num - skip)) {
-                numdecrypt = (p->total_num - skip) - p->data_num;
+            if ((data_num + numbytes) > (p->total_num - skip)) {
+                numdecrypt = (p->total_num - skip) - data_num;
             } else {
                 int frac;
                 numdecrypt = numbytes;
@@ -539,8 +539,6 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             p->readidx += numdecrypt;
             /* advance write pointer */
             p->wptr += numdecrypt;
-            /* increase data_num */
-            p->data_num += numdecrypt;
 
             /* bytes left to take care of without decryption */
             numbytes -= numdecrypt;
@@ -555,13 +553,13 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             p->readidx += numbytes;
             /* advance write pointer */
             p->wptr += numbytes;
-            /* increase data_num */
-            p->data_num += numbytes;
         }
+
 
         /* now check how much data there's left to read to finish the
            current packet */
-        remainpack = p->total_num - p->data_num;
+        data_num = p->wptr - p->payload; /* recalculate */
+        remainpack = p->total_num - data_num;
 
         if (!remainpack) {
             /* we have a full packet */
