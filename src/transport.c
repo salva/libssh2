@@ -155,103 +155,6 @@ decrypt(LIBSSH2_SESSION * session, unsigned char *source,
     return LIBSSH2_ERROR_NONE;         /* all is fine */
 }
 
-/*
- * fullpacket() gets called when a full packet has been received and properly
- * collected.
- */
-static int
-fullpacket(LIBSSH2_SESSION * session, int encrypted /* 1 or 0 */ )
-{
-    unsigned char macbuf[MAX_MACSIZE];
-    struct transportpacket *p = &session->packet;
-    int rc;
-    int compressed;
-
-    if (session->fullpacket_state == libssh2_NB_state_idle) {
-        session->fullpacket_macstate = LIBSSH2_MAC_CONFIRMED;
-        session->fullpacket_payload_len = p->packet_length - 1;
-
-        if (encrypted) {
-
-            /* Calculate MAC hash */
-            session->remote.mac->hash(session, macbuf,  /* store hash here */
-                                      session->remote.seqno,
-                                      p->init, 5,
-                                      p->payload,
-                                      session->fullpacket_payload_len,
-                                      &session->remote.mac_abstract);
-
-            /* Compare the calculated hash with the MAC we just read from
-             * the network. The read one is at the very end of the payload
-             * buffer. Note that 'payload_len' here is the packet_length
-             * field which includes the padding but not the MAC.
-             */
-            if (memcmp(macbuf, p->payload + session->fullpacket_payload_len,
-                       session->remote.mac->mac_len)) {
-                session->fullpacket_macstate = LIBSSH2_MAC_INVALID;
-            }
-        }
-
-        session->remote.seqno++;
-
-        /* ignore the padding */
-        session->fullpacket_payload_len -= p->padding_length;
-
-        /* Check for and deal with decompression */
-        compressed =
-            session->local.comp != NULL &&
-            session->local.comp->compress &&
-            ((session->state & LIBSSH2_STATE_AUTHENTICATED) ||
-             session->local.comp->use_in_auth);
-
-        if (compressed && session->remote.comp_abstract) {
-            /*
-             * The buffer for the decompression (remote.comp_abstract) is
-             * initialised in time when it is needed so as long it is NULL we
-             * cannot decompress.
-             */
-
-            unsigned char *data;
-            size_t data_len;
-            rc = session->remote.comp->decomp(session,
-                                              &data, &data_len,
-                                              LIBSSH2_PACKET_MAXDECOMP,
-                                              p->payload,
-                                              session->fullpacket_payload_len,
-                                              &session->remote.comp_abstract);
-            LIBSSH2_FREE(session, p->payload);
-            if(rc)
-                return rc;
-
-            p->payload = data;
-            session->fullpacket_payload_len = data_len;
-        }
-
-        session->fullpacket_packet_type = p->payload[0];
-
-        debugdump(session, "libssh2_transport_read() plain",
-                  p->payload, session->fullpacket_payload_len);
-
-        session->fullpacket_state = libssh2_NB_state_created;
-    }
-
-    if (session->fullpacket_state == libssh2_NB_state_created) {
-        rc = _libssh2_packet_add(session, p->payload,
-                                 session->fullpacket_payload_len,
-                                 session->fullpacket_macstate);
-        if (rc == LIBSSH2_ERROR_EAGAIN)
-            return rc;
-        if (rc) {
-            session->fullpacket_state = libssh2_NB_state_idle;
-            return rc;
-        }
-    }
-
-    session->fullpacket_state = libssh2_NB_state_idle;
-
-    return session->fullpacket_packet_type;
-}
-
 static int
 refill_read_buffer(LIBSSH2_SESSION * session, int required_len) {
     ssize_t nread;
@@ -550,29 +453,109 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
     case libssh2_NB_state_jump1:
         /* we have a full packet */
 
-        rc = fullpacket(session, p->packet_encrypted);
-        if (rc == LIBSSH2_ERROR_EAGAIN) {
+        if (session->fullpacket_state == libssh2_NB_state_idle) {
+            int compressed;
 
-            if (session->packAdd_state != libssh2_NB_state_idle)
-            {
-                /* fullpacket only returns LIBSSH2_ERROR_EAGAIN if
-                 * libssh2_packet_add returns LIBSSH2_ERROR_EAGAIN. If that
-                 * returns LIBSSH2_ERROR_EAGAIN but the packAdd_state is idle,
-                 * then the packet has been added to the brigade, but some
-                 * immediate action that was taken based on the packet
-                 * type (such as key re-exchange) is not yet complete.
-                 * Clear the way for a new packet to be read in.
+            session->fullpacket_macstate = LIBSSH2_MAC_CONFIRMED;
+            session->fullpacket_payload_len = p->packet_length - 1;
+
+            if (p->packet_encrypted) {
+                unsigned char macbuf[MAX_MACSIZE];
+
+                /* Calculate MAC hash */
+                session->remote.mac->hash(session, macbuf,  /* store hash here */
+                                          session->remote.seqno,
+                                          p->init, 5,
+                                          p->payload,
+                                          session->fullpacket_payload_len,
+                                          &session->remote.mac_abstract);
+
+                /* Compare the calculated hash with the MAC we just read from
+                 * the network. The read one is at the very end of the payload
+                 * buffer. Note that 'payload_len' here is the packet_length
+                 * field which includes the padding but not the MAC.
                  */
-                session->readPack_state = libssh2_NB_state_jump1;
+                if (memcmp(macbuf, p->payload + session->fullpacket_payload_len,
+                           session->remote.mac->mac_len)) {
+                    session->fullpacket_macstate = LIBSSH2_MAC_INVALID;
+                }
             }
-            return rc;
+
+            session->remote.seqno++;
+
+            /* ignore the padding */
+            session->fullpacket_payload_len -= p->padding_length;
+
+            /* Check for and deal with decompression */
+            compressed =
+                session->local.comp != NULL &&
+                session->local.comp->compress &&
+                ((session->state & LIBSSH2_STATE_AUTHENTICATED) ||
+                 session->local.comp->use_in_auth);
+
+            if (compressed && session->remote.comp_abstract) {
+                /*
+                 * The buffer for the decompression (remote.comp_abstract) is
+                 * initialised in time when it is needed so as long it is NULL we
+                 * cannot decompress.
+                 */
+
+                unsigned char *data;
+                size_t data_len;
+                rc = session->remote.comp->decomp(session,
+                                                  &data, &data_len,
+                                                  LIBSSH2_PACKET_MAXDECOMP,
+                                                  p->payload,
+                                                  session->fullpacket_payload_len,
+                                                  &session->remote.comp_abstract);
+                LIBSSH2_FREE(session, p->payload);
+                if(rc)
+                    return rc;
+
+                p->payload = data;
+                session->fullpacket_payload_len = data_len;
+            }
+
+            session->fullpacket_packet_type = p->payload[0];
+
+            debugdump(session, "libssh2_transport_read() plain",
+                      p->payload, session->fullpacket_payload_len);
+
+            session->fullpacket_state = libssh2_NB_state_created;
         }
 
-        p->payload = NULL; /* payload has been eaten by fullpacket */
-        p->payload_length = 0; /* no packet buffer available */
-        session->readPack_state = libssh2_NB_state_idle;
 
-        return rc;
+        if (session->fullpacket_state == libssh2_NB_state_created) {
+            rc = _libssh2_packet_add(session, p->payload,
+                                     session->fullpacket_payload_len,
+                                     session->fullpacket_macstate);
+            if (rc) {
+                if (rc == LIBSSH2_ERROR_EAGAIN) {
+                    if (session->packAdd_state != libssh2_NB_state_idle) {
+                        /* fullpacket only returns LIBSSH2_ERROR_EAGAIN if
+                         * libssh2_packet_add returns LIBSSH2_ERROR_EAGAIN. If that
+                         * returns LIBSSH2_ERROR_EAGAIN but the packAdd_state is idle,
+                         * then the packet has been added to the brigade, but some
+                         * immediate action that was taken based on the packet
+                         * type (such as key re-exchange) is not yet complete.
+                         * Clear the way for a new packet to be read in.
+                         */
+                        session->readPack_state = libssh2_NB_state_jump1;
+                    }
+                }
+                else
+                    session->fullpacket_state = libssh2_NB_state_idle;
+
+                return rc;
+            }
+            session->fullpacket_state = libssh2_NB_state_idle;
+
+            p->payload = NULL; /* payload has been eaten by fullpacket */
+            p->payload_length = 0; /* no packet buffer available */
+            session->readPack_state = libssh2_NB_state_idle;
+
+            return session->fullpacket_packet_type;
+        }
 
     default:
         _libssh2_debug(session, LIBSSH2_TRACE_TRANS,
