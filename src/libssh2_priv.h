@@ -472,8 +472,8 @@ struct transportpacket
                                the buffer */
     uint32_t packet_length; /* the most recent packet_length as read from the
                                network data */
-    int packet_encrypted;   /* was the packet encrypted? */
-
+    uint8_t packet_encrypted;/* was the packet encrypted? */
+    uint8_t packet_type;    /* SSH packet code */
     uint8_t padding_length; /* the most recent padding_length as read from the
                                network data */
     size_t payload_length;  /* How much a total package is supposed to be, in
@@ -738,10 +738,6 @@ struct _LIBSSH2_SESSION
                                           states */
     packet_queue_listener_state_t packAdd_Qlstn_state;
     packet_x11_open_state_t packAdd_x11open_state;
-
-    /* State variables used in fullpacket() */
-    size_t fullpacket_payload_len;
-    int fullpacket_packet_type;
 
     /* State variables used in libssh2_sftp_init() */
     libssh2_nonblocking_states sftpInit_state;
