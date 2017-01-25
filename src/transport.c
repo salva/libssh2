@@ -324,18 +324,12 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             /* we now have the initial blocksize bytes decrypted,
              * and we can extract packet and padding length from it
              */
-            p->packet_length = _libssh2_ntohu32(block);
-            if (p->packet_length < 1) {
-                session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
-                return LIBSSH2_ERROR_DECRYPT;
-            }
-
-            p->padding_length = block[4];
+            p->packet_length = _libssh2_ntohu32(block) - 1;
 
             /* payload_length is the number of bytes following the initial
                (5 bytes) packet length and padding length fields */
             payload_length =
-                p->packet_length - 1 +
+                p->packet_length +
                 (p->packet_encrypted ? session->remote.mac->mac_len : 0);
 
             /* RFC4253 section 6.1 Maximum Packet Length says:
@@ -346,12 +340,15 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
              * or less (including length, padding length, payload,
              * padding, and MAC.)."
              */
-            if (payload_length > LIBSSH2_PACKET_MAXPAYLOAD) {
+            if (payload_length > LIBSSH2_PACKET_MAXPAYLOAD ||
+                p->packet_length > LIBSSH2_PACKET_MAXPAYLOAD) {
                 _libssh2_debug(session, LIBSSH2_TRACE_SOCKET,
                                "Packet too big received (%d bytes), dropping connection", payload_length);
                 session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
                 return LIBSSH2_ERROR_OUT_OF_BOUNDARY;
             }
+
+            p->padding_length = block[4];
 
             /* Get a packet handle put data into. We get one to
                hold all data, including padding and MAC. */
@@ -464,8 +461,6 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
         }
 
         /* we have a full packet */
-        session->fullpacket_payload_len = p->packet_length - 1;
-
         if (p->packet_encrypted) {
             unsigned char macbuf[MAX_MACSIZE];
 
@@ -474,7 +469,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
                                       session->remote.seqno,
                                       p->init, 5,
                                       p->payload,
-                                      session->fullpacket_payload_len,
+                                      p->packet_length,
                                       &session->remote.mac_abstract);
 
             /* Compare the calculated hash with the MAC we just read from
@@ -482,7 +477,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
              * buffer. Note that 'payload_len' here is the packet_length
              * field which includes the padding but not the MAC.
              */
-            if (memcmp(macbuf, p->payload + session->fullpacket_payload_len,
+            if (memcmp(macbuf, p->payload + p->packet_length,
                        session->remote.mac->mac_len)) {
                 if (!session->macerror ||
                     LIBSSH2_MACERROR(session, (char *)p->payload,
@@ -498,7 +493,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
         session->remote.seqno++;
 
         /* ignore the padding */
-        session->fullpacket_payload_len -= p->padding_length;
+        p->packet_length -= p->padding_length;
 
         /* Check for and deal with decompression */
         compressed =
@@ -520,25 +515,25 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
                                               &data, &data_len,
                                               LIBSSH2_PACKET_MAXDECOMP,
                                               p->payload,
-                                              session->fullpacket_payload_len,
+                                              p->packet_length,
                                               &session->remote.comp_abstract);
-            LIBSSH2_FREE(session, p->payload);
             if(rc)
                 return rc;
 
+            LIBSSH2_FREE(session, p->payload);
             p->payload = data;
-            session->fullpacket_payload_len = data_len;
+            p->packet_length = data_len;
         }
 
-        session->fullpacket_packet_type = p->payload[0];
+        p->packet_type = p->payload[0];
 
         debugdump(session, "libssh2_transport_read() plain",
-                  p->payload, session->fullpacket_payload_len);
+                  p->payload, p->packet_length);
 
     case libssh2_NB_state_jump1:
         session->readPack_state = libssh2_NB_state_idle;
         rc = _libssh2_packet_add(session, p->payload,
-                                 session->fullpacket_payload_len);
+                                 p->packet_length);
 	if (rc == LIBSSH2_ERROR_EAGAIN) {
 	    if (session->packAdd_state == libssh2_NB_state_idle) {
 		/* 
@@ -558,7 +553,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
 
         p->payload = NULL; /* payload has been eaten by _libssh2_packet_add */
         p->payload_length = 0; /* no packet buffer available */
-        return (rc < 0) ? rc : session->fullpacket_packet_type;
+        return (rc < 0) ? rc : p->packet_type;
 
     default:
         _libssh2_debug(session, LIBSSH2_TRACE_TRANS,
