@@ -1005,7 +1005,6 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
             session->packet.payload_length = 0;
         }
         session->packAdd_state = libssh2_NB_state_idle;
-        session->fullpacket_state = libssh2_NB_state_idle;
 
         memset(&session->startup_key_state, 0, sizeof(key_exchange_state_t));
 

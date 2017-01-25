@@ -740,7 +740,6 @@ struct _LIBSSH2_SESSION
     packet_x11_open_state_t packAdd_x11open_state;
 
     /* State variables used in fullpacket() */
-    libssh2_nonblocking_states fullpacket_state;
     int fullpacket_macstate;
     size_t fullpacket_payload_len;
     int fullpacket_packet_type;
