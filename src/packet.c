@@ -413,7 +413,7 @@ packet_x11_open(LIBSSH2_SESSION * session, unsigned char *data,
  */
 int
 _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
-                    size_t datalen, int macstate)
+                    size_t datalen)
 {
     int rc = 0;
     char *message=NULL;
@@ -430,16 +430,6 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
                        "Packet type %d received, length=%d",
                        (int) msg, (int) datalen);
 
-        if ((macstate == LIBSSH2_MAC_INVALID) &&
-            (!session->macerror ||
-             LIBSSH2_MACERROR(session, (char *) data, datalen))) {
-            /* Bad MAC input, but no callback set or non-zero return from the
-               callback */
-
-            LIBSSH2_FREE(session, data);
-            return _libssh2_error(session, LIBSSH2_ERROR_INVALID_MAC,
-                                  "Invalid MAC received");
-        }
         session->packAdd_state = libssh2_NB_state_allocated;
         break;
     case libssh2_NB_state_jump1:
