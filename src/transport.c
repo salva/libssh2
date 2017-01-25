@@ -316,14 +316,14 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
 {
     int rc;
     struct transportpacket *p = &session->packet;
-    int remainpack;
+    int payload_missing;
     int buf_available;
     int numdecrypt;
     unsigned char block[MAX_BLOCKSIZE];
     int blocksize;
     int encrypted = 1;
-    size_t total_num;
-    size_t data_num;
+    size_t payload_length;
+    size_t payload_available;
 
     /* default clear the bit */
     session->socket_block_directions &= ~LIBSSH2_SESSION_BLOCK_INBOUND;
@@ -386,8 +386,8 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
         if (buf_available < 0)
             return buf_available;
 
-        if (!p->total_num) {
-            /* ensure no payload buffer has been allocated when total_num is 0: */
+        if (!p->payload_length) {
+            /* ensure no payload buffer has been allocated when payload_length is 0: */
             assert(p->payload == NULL);
 
             /* No payload package area allocated yet. To know the
@@ -433,9 +433,9 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
 
             p->padding_length = block[4];
 
-            /* total_num is the number of bytes following the initial
+            /* payload_length is the number of bytes following the initial
                (5 bytes) packet length and padding length fields */
-            total_num =
+            payload_length =
                 p->packet_length - 1 +
                 (encrypted ? session->remote.mac->mac_len : 0);
 
@@ -447,21 +447,21 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
              * or less (including length, padding length, payload,
              * padding, and MAC.)."
              */
-            if (total_num > LIBSSH2_PACKET_MAXPAYLOAD) {
+            if (payload_length > LIBSSH2_PACKET_MAXPAYLOAD) {
                 _libssh2_debug(session, LIBSSH2_TRACE_SOCKET,
-                               "Packet too big received (%d bytes), dropping connection", total_num);
+                               "Packet too big received (%d bytes), dropping connection", payload_length);
                 session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
                 return LIBSSH2_ERROR_OUT_OF_BOUNDARY;
             }
 
             /* Get a packet handle put data into. We get one to
                hold all data, including padding and MAC. */
-            p->payload = LIBSSH2_ALLOC(session, total_num);
+            p->payload = LIBSSH2_ALLOC(session, payload_length);
             if (!p->payload) {
                 session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
                 return LIBSSH2_ERROR_ALLOC;
             }
-            p->total_num = total_num;
+            p->payload_length = payload_length;
             /* init write pointer to start of payload buffer */
             p->payload_wptr = p->payload;
 
@@ -477,17 +477,17 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             buf_available -= blocksize;
         }
 
-        data_num = p->payload_wptr - p->payload; /* number of bytes of the package read
-                                          * so far */
+        payload_available = p->payload_wptr - p->payload; /* number of bytes read so far into the
+                                                           * payload */
 
         /* how much there is left to add to the current payload
            package */
-        remainpack = p->total_num - data_num;
+        payload_missing = p->payload_length - payload_available;
 
-        if (buf_available > remainpack) {
+        if (buf_available > payload_missing) {
             /* if we have more data in the buffer than what is going into this
                particular packet, we limit this round to this packet only */
-            buf_available = remainpack;
+            buf_available = payload_missing;
         }
 
         if (encrypted) {
@@ -500,8 +500,8 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             /* if what we have plus buf_available is bigger than the
                total minus the skip margin, we should lower the
                amount to decrypt even more */
-            if ((data_num + buf_available) > (p->total_num - skip)) {
-                numdecrypt = (p->total_num - skip) - data_num;
+            if ((payload_available + buf_available) > (p->payload_length - skip)) {
+                numdecrypt = (p->payload_length - skip) - payload_available;
             } else {
                 int frac;
                 numdecrypt = buf_available;
@@ -525,7 +525,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             /* now decrypt the lot */
             rc = decrypt(session, p->buf_rptr, p->payload_wptr, numdecrypt);
             if (rc != LIBSSH2_ERROR_NONE) {
-                p->total_num = 0;   /* no packet buffer available */
+                p->payload_length = 0;   /* no packet buffer available */
                 LIBSSH2_FREE(session, p->payload);
                 p->payload = NULL;
                 session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
@@ -555,10 +555,10 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
 
         /* now check how much data there's left to read to finish the
            current packet */
-        data_num = p->payload_wptr - p->payload; /* recalculate */
-        remainpack = p->total_num - data_num;
+        payload_available = p->payload_wptr - p->payload; /* recalculate */
+        payload_missing = p->payload_length - payload_available;
 
-        if (!remainpack) {
+        if (!payload_missing) {
             /* we have a full packet */
           libssh2_transport_read_point1:
             rc = fullpacket(session, encrypted);
@@ -582,7 +582,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             }
 
             p->payload = NULL; /* payload has been eaten by fullpacket */
-            p->total_num = 0; /* no packet buffer available */
+            p->payload_length = 0; /* no packet buffer available */
             return rc;
         }
     } while (1);                /* loop */

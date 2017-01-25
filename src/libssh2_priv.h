@@ -474,7 +474,7 @@ struct transportpacket
                                network data */
     uint8_t padding_length; /* the most recent padding_length as read from the
                                network data */
-    size_t total_num;       /* How much a total package is supposed to be, in
+    size_t payload_length;  /* How much a total package is supposed to be, in
                                number of bytes. A full package is
                                packet_length + padding_length + 4 +
                                mac_length. */
