@@ -321,7 +321,6 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
     int numdecrypt;
     unsigned char block[MAX_BLOCKSIZE];
     int blocksize;
-    int encrypted = 1;
     size_t payload_length;
     size_t payload_available;
 
@@ -353,26 +352,16 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             return rc;
     }
 
-    /*
-     * =============================== NOTE ===============================
-     * I know this is very ugly and not a really good use of "goto", but
-     * this case statement would be even uglier to do it any other way
-     */
-    if (session->readPack_state == libssh2_NB_state_jump1) {
-        session->readPack_state = libssh2_NB_state_idle;
-        encrypted = session->readPack_encrypted;
-        goto libssh2_transport_read_point1;
-    }
+    if (session->socket_state == LIBSSH2_SOCKET_DISCONNECTED)
+        return LIBSSH2_ERROR_SOCKET_DISCONNECT;
 
-    do {
-        if (session->socket_state == LIBSSH2_SOCKET_DISCONNECTED) {
-            return LIBSSH2_ERROR_SOCKET_DISCONNECT;
-        }
-
+    switch(session->readPack_state) {
+    case libssh2_NB_state_idle:
         if (session->state & LIBSSH2_STATE_NEWKEYS) {
+            p->packet_encrypted = 1;
             blocksize = session->remote.crypt->blocksize;
         } else {
-            encrypted = 0;      /* not encrypted */
+            p->packet_encrypted = 0; /* not encrypted */
             blocksize = 5;      /* not strictly true, but we can use 5 here to
                                    make the checks below work fine still */
         }
@@ -404,7 +393,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
                 return LIBSSH2_ERROR_EAGAIN;
             }
 
-            if (encrypted) {
+            if (p->packet_encrypted) {
                 rc = decrypt(session, p->buf_rptr, block, blocksize);
                 if (rc != LIBSSH2_ERROR_NONE) {
                     session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
@@ -437,7 +426,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
                (5 bytes) packet length and padding length fields */
             payload_length =
                 p->packet_length - 1 +
-                (encrypted ? session->remote.mac->mac_len : 0);
+                (p->packet_encrypted ? session->remote.mac->mac_len : 0);
 
             /* RFC4253 section 6.1 Maximum Packet Length says:
              *
@@ -472,121 +461,125 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
                 memcpy(p->payload_wptr, &block[5], blocksize - 5);
                 p->payload_wptr += blocksize - 5;       /* advance write pointer */
             }
-
-            /* we already dealt with a blocksize worth of data */
-            buf_available -= blocksize;
         }
 
-        payload_available = p->payload_wptr - p->payload; /* number of bytes read so far into the
-                                                           * payload */
+        while (1) {
+            /* number of bytes read so far into the payload */
+            payload_available = p->payload_wptr - p->payload;
 
-        /* how much there is left to add to the current payload
-           package */
-        payload_missing = p->payload_length - payload_available;
+            /* how much there is left to add to the current payload
+               package */
+            payload_missing = p->payload_length - payload_available;
 
-        if (buf_available > payload_missing) {
-            /* if we have more data in the buffer than what is going into this
-               particular packet, we limit this round to this packet only */
-            buf_available = payload_missing;
-        }
+            /* have we read the full payload? then go process the packet */
+            if (payload_missing == 0) break;
 
-        if (encrypted) {
-            /* At the end of the incoming stream, there is a MAC,
-               and we don't want to decrypt that since we need it
-               "raw". We MUST however decrypt the padding data
-               since it is used for the hash later on. */
-            int skip = session->remote.mac->mac_len;
+            buf_available = refill_read_buffer(session, 1);
+            if (buf_available < 0)
+                return buf_available;
 
-            /* if what we have plus buf_available is bigger than the
-               total minus the skip margin, we should lower the
-               amount to decrypt even more */
-            if ((payload_available + buf_available) > (p->payload_length - skip)) {
-                numdecrypt = (p->payload_length - skip) - payload_available;
+            if (buf_available > payload_missing) {
+                /* if we have more data in the buffer than what is going into this
+                   particular packet, we limit this round to this packet only */
+                buf_available = payload_missing;
+            }
+
+            if (p->packet_encrypted) {
+                /* At the end of the incoming stream, there is a MAC,
+                   and we don't want to decrypt that since we need it
+                   "raw". We MUST however decrypt the padding data
+                   since it is used for the hash later on. */
+                int skip = session->remote.mac->mac_len;
+
+                /* if what we have plus buf_available is bigger than the
+                   total minus the skip margin, we should lower the
+                   amount to decrypt even more */
+                if ((payload_available + buf_available) > (p->payload_length - skip)) {
+                    numdecrypt = (p->payload_length - skip) - payload_available;
+                } else {
+                    int frac;
+                    numdecrypt = buf_available;
+                    frac = numdecrypt % blocksize;
+                    if (frac) {
+                        /* not an aligned amount of blocks,
+                           align it */
+                        numdecrypt -= frac;
+                        /* and make it no unencrypted data
+                           after it */
+                        buf_available = 0;
+                    }
+                }
             } else {
-                int frac;
-                numdecrypt = buf_available;
-                frac = numdecrypt % blocksize;
-                if (frac) {
-                    /* not an aligned amount of blocks,
-                       align it */
-                    numdecrypt -= frac;
-                    /* and make it no unencrypted data
-                       after it */
-                    buf_available = 0;
-                }
-            }
-        } else {
-            /* unencrypted data should not be decrypted at all */
-            numdecrypt = 0;
-        }
-
-        /* if there are bytes to decrypt, do that */
-        if (numdecrypt > 0) {
-            /* now decrypt the lot */
-            rc = decrypt(session, p->buf_rptr, p->payload_wptr, numdecrypt);
-            if (rc != LIBSSH2_ERROR_NONE) {
-                p->payload_length = 0;   /* no packet buffer available */
-                LIBSSH2_FREE(session, p->payload);
-                p->payload = NULL;
-                session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
-                return rc;
+                /* unencrypted data should not be decrypted at all */
+                numdecrypt = 0;
             }
 
-            /* advance the read pointer */
-            p->buf_rptr += numdecrypt;
-            /* advance write pointer */
-            p->payload_wptr += numdecrypt;
-
-            /* bytes left to take care of without decryption */
-            buf_available -= numdecrypt;
-        }
-
-        /* if there are bytes to copy that aren't decrypted, simply
-           copy them as-is to the target buffer */
-        if (buf_available > 0) {
-            memcpy(p->payload_wptr, p->buf_rptr, buf_available);
-
-            /* advance the buffer read pointer */
-            p->buf_rptr += buf_available;
-            /* advance the payload write pointer */
-            p->payload_wptr += buf_available;
-        }
-
-
-        /* now check how much data there's left to read to finish the
-           current packet */
-        payload_available = p->payload_wptr - p->payload; /* recalculate */
-        payload_missing = p->payload_length - payload_available;
-
-        if (!payload_missing) {
-            /* we have a full packet */
-          libssh2_transport_read_point1:
-            rc = fullpacket(session, encrypted);
-            if (rc == LIBSSH2_ERROR_EAGAIN) {
-
-                if (session->packAdd_state != libssh2_NB_state_idle)
-                {
-                    /* fullpacket only returns LIBSSH2_ERROR_EAGAIN if
-                     * libssh2_packet_add returns LIBSSH2_ERROR_EAGAIN. If that
-                     * returns LIBSSH2_ERROR_EAGAIN but the packAdd_state is idle,
-                     * then the packet has been added to the brigade, but some
-                     * immediate action that was taken based on the packet
-                     * type (such as key re-exchange) is not yet complete.
-                     * Clear the way for a new packet to be read in.
-                     */
-                    session->readPack_encrypted = encrypted;
-                    session->readPack_state = libssh2_NB_state_jump1;
+            /* if there are bytes to decrypt, do that */
+            if (numdecrypt > 0) {
+                /* now decrypt the lot */
+                rc = decrypt(session, p->buf_rptr, p->payload_wptr, numdecrypt);
+                if (rc != LIBSSH2_ERROR_NONE) {
+                    p->payload_length = 0;   /* no packet buffer available */
+                    LIBSSH2_FREE(session, p->payload);
+                    p->payload = NULL;
+                    session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
+                    return rc;
                 }
 
-                return rc;
+                /* advance the read pointer */
+                p->buf_rptr += numdecrypt;
+                /* advance write pointer */
+                p->payload_wptr += numdecrypt;
+
+                /* bytes left to take care of without decryption */
+                buf_available -= numdecrypt;
             }
 
-            p->payload = NULL; /* payload has been eaten by fullpacket */
-            p->payload_length = 0; /* no packet buffer available */
+            /* if there are bytes to copy that aren't decrypted, simply
+               copy them as-is to the target buffer */
+            if (buf_available > 0) {
+                memcpy(p->payload_wptr, p->buf_rptr, buf_available);
+
+                /* advance the buffer read pointer */
+                p->buf_rptr += buf_available;
+                /* advance the payload write pointer */
+                p->payload_wptr += buf_available;
+            }
+        }
+
+    case libssh2_NB_state_jump1:
+        /* we have a full packet */
+
+        rc = fullpacket(session, p->packet_encrypted);
+        if (rc == LIBSSH2_ERROR_EAGAIN) {
+
+            if (session->packAdd_state != libssh2_NB_state_idle)
+            {
+                /* fullpacket only returns LIBSSH2_ERROR_EAGAIN if
+                 * libssh2_packet_add returns LIBSSH2_ERROR_EAGAIN. If that
+                 * returns LIBSSH2_ERROR_EAGAIN but the packAdd_state is idle,
+                 * then the packet has been added to the brigade, but some
+                 * immediate action that was taken based on the packet
+                 * type (such as key re-exchange) is not yet complete.
+                 * Clear the way for a new packet to be read in.
+                 */
+                session->readPack_state = libssh2_NB_state_jump1;
+            }
             return rc;
         }
-    } while (1);                /* loop */
 
+        p->payload = NULL; /* payload has been eaten by fullpacket */
+        p->payload_length = 0; /* no packet buffer available */
+        session->readPack_state = libssh2_NB_state_idle;
+
+        return rc;
+
+    default:
+        _libssh2_debug(session, LIBSSH2_TRACE_TRANS,
+                       "Internal error, state %d not handled",
+                       session->readPack_state);
+        break;
+    }
     return LIBSSH2_ERROR_SOCKET_RECV; /* we never reach this point */
 }
 

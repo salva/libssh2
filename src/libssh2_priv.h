@@ -472,6 +472,8 @@ struct transportpacket
                                the buffer */
     uint32_t packet_length; /* the most recent packet_length as read from the
                                network data */
+    int packet_encrypted;   /* was the packet encrypted? */
+
     uint8_t padding_length; /* the most recent padding_length as read from the
                                network data */
     size_t payload_length;  /* How much a total package is supposed to be, in
@@ -648,7 +650,6 @@ struct _LIBSSH2_SESSION
 
     /* State variables used in libssh2_packet_read() */
     libssh2_nonblocking_states readPack_state;
-    int readPack_encrypted;
 
     /* State variables used in libssh2_userauth_list() */
     libssh2_nonblocking_states userauth_list_state;
