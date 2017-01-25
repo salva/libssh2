@@ -132,7 +132,6 @@ static int
 decrypt(LIBSSH2_SESSION * session, unsigned char *source,
         unsigned char *dest, int len)
 {
-    struct transportpacket *p = &session->packet;
     int blocksize = session->remote.crypt->blocksize;
 
     /* if we get called with a len that isn't an even number of blocksizes
@@ -141,10 +140,8 @@ decrypt(LIBSSH2_SESSION * session, unsigned char *source,
 
     while (len >= blocksize) {
         if (session->remote.crypt->crypt(session, source, blocksize,
-                                         &session->remote.crypt_abstract)) {
-            LIBSSH2_FREE(session, p->payload);
+                                         &session->remote.crypt_abstract))
             return LIBSSH2_ERROR_DECRYPT;
-        }
 
         /* if the crypt() function would write to a given address it
            wouldn't have to memcpy() and we could avoid this memcpy()
