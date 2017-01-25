@@ -452,7 +452,6 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
         }
 
         /* we have a full packet */
-        session->fullpacket_macstate = LIBSSH2_MAC_CONFIRMED;
         session->fullpacket_payload_len = p->packet_length - 1;
 
         if (p->packet_encrypted) {
@@ -473,7 +472,14 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
              */
             if (memcmp(macbuf, p->payload + session->fullpacket_payload_len,
                        session->remote.mac->mac_len)) {
-                session->fullpacket_macstate = LIBSSH2_MAC_INVALID;
+                if (!session->macerror ||
+                    LIBSSH2_MACERROR(session, (char *)p->payload,
+                                     p->payload_length)) {
+                    /* Bad MAC input and no callback set or non-zero
+                       return from the callback */
+                    return _libssh2_error(session, LIBSSH2_ERROR_INVALID_MAC,
+                                          "Invalid MAC received");
+                }
             }
         }
 
@@ -520,8 +526,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
     case libssh2_NB_state_jump1:
         session->readPack_state = libssh2_NB_state_idle;
         rc = _libssh2_packet_add(session, p->payload,
-                                 session->fullpacket_payload_len,
-                                 session->fullpacket_macstate);
+                                 session->fullpacket_payload_len);
         if (rc) {
             if (rc == LIBSSH2_ERROR_EAGAIN) {
                 if (session->packAdd_state != libssh2_NB_state_idle) {

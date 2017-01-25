@@ -740,7 +740,6 @@ struct _LIBSSH2_SESSION
     packet_x11_open_state_t packAdd_x11open_state;
 
     /* State variables used in fullpacket() */
-    int fullpacket_macstate;
     size_t fullpacket_payload_len;
     int fullpacket_packet_type;
 
@@ -917,13 +916,6 @@ _libssh2_debug(LIBSSH2_SESSION * session, int context, const char *format, ...)
 #define LIBSSH2_SOCKET_UNKNOWN                   1
 #define LIBSSH2_SOCKET_CONNECTED                 0
 #define LIBSSH2_SOCKET_DISCONNECTED             -1
-
-/* Initial packet state, prior to MAC check */
-#define LIBSSH2_MAC_UNCONFIRMED                  1
-/* When MAC type is "none" (proto initiation phase) all packets are deemed "confirmed" */
-#define LIBSSH2_MAC_CONFIRMED                    0
-/* Something very bad is going on */
-#define LIBSSH2_MAC_INVALID                     -1
 
 /* Flags for _libssh2_error_flags */
 /* Error message is allocated on the heap */
