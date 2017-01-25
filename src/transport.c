@@ -390,7 +390,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             return buf_available;
 
         if (!p->total_num) {
-            /* no payload buffer should be allocated when total_num is 0: */
+            /* ensure no payload buffer has been allocated when total_num is 0: */
             assert(p->payload == NULL);
 
             /* No payload package area allocated yet. To know the
