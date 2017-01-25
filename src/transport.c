@@ -259,7 +259,7 @@ static int
 refill_read_buffer(LIBSSH2_SESSION * session, int required_len) {
     ssize_t nread;
     struct transportpacket *p = &session->packet;
-    int remaining = p->writeidx - p->readidx;
+    int remaining = p->buf_wptr - p->buf_rptr;
     assert(remaining >= 0); /* if remaining turns negative we have a
                              * bad internal error */
 
@@ -268,12 +268,12 @@ refill_read_buffer(LIBSSH2_SESSION * session, int required_len) {
 
     /* move any remainder to the start of the buffer so that we can do
        a full refill */
-    memmove(p->buf, &p->buf[p->readidx], remaining);
-    p->readidx = 0;
-    p->writeidx = remaining;
+    memmove(p->buf, p->buf_rptr, remaining);
+    p->buf_rptr = p->buf;
+    p->buf_wptr = p->buf + remaining;
 
     /* now read a big chunk from the network into the temp buffer */
-    nread = LIBSSH2_RECV(session, &p->buf[remaining],
+    nread = LIBSSH2_RECV(session, p->buf_wptr,
                          PACKETBUFSIZE - remaining,
                          LIBSSH2_SOCKET_RECV_FLAGS(session));
     if (nread <= 0) {
@@ -296,8 +296,8 @@ refill_read_buffer(LIBSSH2_SESSION * session, int required_len) {
     debugdump(session, "libssh2_transport_read() raw",
               &p->buf[remaining], nread);
 
-    p->writeidx += nread; /* advance write pointer */
-    return p->writeidx - p->readidx;
+    p->buf_wptr += nread; /* advance write pointer */
+    return p->buf_wptr - p->buf_rptr;
 }
 
 /*
@@ -408,22 +408,22 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             }
 
             if (encrypted) {
-                rc = decrypt(session, &p->buf[p->readidx], block, blocksize);
+                rc = decrypt(session, p->buf_rptr, block, blocksize);
                 if (rc != LIBSSH2_ERROR_NONE) {
                     session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
                     return rc;
                 }
                 /* save the first 5 bytes of the decrypted package, to be
                    used in the hash calculation later down. */
-                memcpy(p->init, &p->buf[p->readidx], 5);
+                memcpy(p->init, p->buf_rptr, 5);
             } else {
                 /* the data is plain, just copy it verbatim to
                    the working block buffer */
-                memcpy(block, &p->buf[p->readidx], blocksize);
+                memcpy(block, p->buf_rptr, blocksize);
             }
 
-            /* advance the read pointer */
-            p->readidx += blocksize;
+            /* advance the buffer read pointer */
+            p->buf_rptr += blocksize;
 
             /* we now have the initial blocksize bytes decrypted,
              * and we can extract packet and padding length from it
@@ -526,7 +526,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
         /* if there are bytes to decrypt, do that */
         if (numdecrypt > 0) {
             /* now decrypt the lot */
-            rc = decrypt(session, &p->buf[p->readidx], p->wptr, numdecrypt);
+            rc = decrypt(session, p->buf_rptr, p->wptr, numdecrypt);
             if (rc != LIBSSH2_ERROR_NONE) {
                 p->total_num = 0;   /* no packet buffer available */
                 LIBSSH2_FREE(session, p->payload);
@@ -536,7 +536,7 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             }
 
             /* advance the read pointer */
-            p->readidx += numdecrypt;
+            p->buf_rptr += numdecrypt;
             /* advance write pointer */
             p->wptr += numdecrypt;
 
@@ -547,10 +547,10 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
         /* if there are bytes to copy that aren't decrypted, simply
            copy them as-is to the target buffer */
         if (numbytes > 0) {
-            memcpy(p->wptr, &p->buf[p->readidx], numbytes);
+            memcpy(p->wptr, p->buf_rptr, numbytes);
 
             /* advance the read pointer */
-            p->readidx += numbytes;
+            p->buf_rptr += numbytes;
             /* advance write pointer */
             p->wptr += numbytes;
         }

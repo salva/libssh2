@@ -466,9 +466,9 @@ struct transportpacket
     unsigned char buf[PACKETBUFSIZE];
     unsigned char init[5];  /* first 5 bytes of the incoming data stream,
                                still encrypted */
-    size_t writeidx;        /* at what array index we do the next write into
+    unsigned char *buf_wptr;/* at what array index we do the next write into
                                the buffer */
-    size_t readidx;         /* at what array index we do the next read from
+    unsigned char *buf_rptr;/* at what array index we do the next read from
                                the buffer */
     uint32_t packet_length; /* the most recent packet_length as read from the
                                network data */
