@@ -155,6 +155,15 @@ decrypt(LIBSSH2_SESSION * session, unsigned char *source,
     return LIBSSH2_ERROR_NONE;         /* all is fine */
 }
 
+
+
+/*
+ * refill_read_buffer
+ *
+ * When not enough data is available in the buffer reads a whole big
+ * chunk from the network.
+ *
+ */
 static int
 refill_read_buffer(LIBSSH2_SESSION * session, int required_len) {
     ssize_t nread;
@@ -250,27 +259,16 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
 			  make the checks below work fine still */
     }
 
-    /* read/use a whole big chunk into a temporary area stored in
-       the LIBSSH2_SESSION struct. We will decrypt data from that
-       buffer into the packet buffer so this temp one doesn't have
-       to be able to keep a whole SSH packet, just be large enough
-       so that we can read big chunks from the network layer. */
-    buf_available = refill_read_buffer(session, blocksize);
-    if (buf_available < 0)
-	return buf_available;
-
-    if (!p->payload_length) {
-	/* ensure no payload buffer has been allocated when payload_length is 0: */
-	assert(p->payload == NULL);
-
+    if (!p->payload) {
 	/* No payload package area allocated yet. To know the
 	   size of this payload, we need to decrypt the first
 	   blocksize data. */
+
+	buf_available = refill_read_buffer(session, blocksize);
+	if (buf_available < 0)
+	    return buf_available;
+
 	if (buf_available < blocksize) {
-	    /* we can't act on anything less than blocksize, but this
-	       check is only done for the initial block since once we have
-	       got the start of a block we can in fact deal with fractions
-	    */
 	    session->socket_block_directions |=
 		LIBSSH2_SESSION_BLOCK_INBOUND;
 	    return LIBSSH2_ERROR_EAGAIN;

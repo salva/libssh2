@@ -1011,11 +1011,8 @@ session_free(LIBSSH2_SESSION *session)
     }
 
     /* Free payload buffer */
-    if (session->packet.payload_length) {
+    if (session->packet.payload) {
         LIBSSH2_FREE(session, session->packet.payload);
-    }
-    else {
-        assert(session->packet.payload == NULL);
     }
 
     /* Cleanup all remaining packets */
