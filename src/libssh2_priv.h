@@ -473,7 +473,6 @@ struct transportpacket
     uint32_t packet_length; /* the most recent packet_length as read from the
                                network data */
     uint8_t packet_encrypted;/* was the packet encrypted? */
-    uint8_t packet_type;    /* SSH packet code */
     uint8_t padding_length; /* the most recent padding_length as read from the
                                network data */
     size_t payload_length;  /* How much a total package is supposed to be, in
