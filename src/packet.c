@@ -399,21 +399,50 @@ packet_x11_open(LIBSSH2_SESSION * session, unsigned char *data,
     return 0;
 }
 
+static void
+packet_read_done(LIBSSH2_SESSION *session, int free_payload) {
+    struct transportpacket *p = &session->packet;
+    if (p->payload) {
+	if (free_payload)
+	    LIBSSH2_FREE(session, p->payload);
+	p->payload = NULL;
+    }
+    p->payload_length = 0;
+    p->packet_length = 0;
+    session->packAdd_state = libssh2_NB_state_idle;
+}
+
+static int
+packet_read_error(LIBSSH2_SESSION *session, int rc, const char *errstr) {
+    struct transportpacket *p = &session->packet;
+    unsigned int msg = p->payload[0];
+    packet_read_done(session, 1);
+
+    switch (rc) {
+    case LIBSSH2_ERROR_NONE:
+	return msg;
+	
+    case LIBSSH2_ERROR_SOCKET_DISCONNECT:
+	session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
+	break;
+
+    }
+    if (errstr)
+	_libssh2_error(session, rc, errstr);
+    return rc;
+}
+
 /*
- * _libssh2_packet_add
+ * _libssh2_packet_read
  *
- * Create a new packet and attach it to the brigade. Called from the transport
- * layer when it has received a packet.
+ * Reads a new packet from the network and attaches it to the brigade.
  *
  * The input pointer 'data' is pointing to allocated data that this function
  * is asked to deal with so on failure OR success, it must be freed fine.
  * The only exception is when the return code is LIBSSH2_ERROR_EAGAIN.
- *
- * This function will always be called with 'datalen' greater than zero.
  */
 int
-_libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
-                    size_t datalen)
+_libssh2_packet_read(LIBSSH2_SESSION * session)
 {
     int rc = 0;
     char *message=NULL;
@@ -422,16 +451,56 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
     size_t language_len=0;
     LIBSSH2_CHANNEL *channelp = NULL;
     size_t data_head = 0;
-    unsigned char msg = data[0];
+    unsigned char *data;
+    unsigned int datalen;
+    unsigned char msg;
+    struct transportpacket *p = &session->packet;
 
-    switch(session->packAdd_state) {
-    case libssh2_NB_state_idle:
-        _libssh2_debug(session, LIBSSH2_TRACE_TRANS,
+    _libssh2_debug(session, LIBSSH2_TRACE_TRANS,
+		   "entering _libssh2_packet_read, state: %d, payload: %p, length: %d",
+		   session->packAdd_state, p->payload, p->payload_length);
+    
+    /*
+     * All channels, systems, subsystems, etc eventually make it down here
+     * when looking for more incoming data. If a key exchange is going on
+     * (LIBSSH2_STATE_EXCHANGING_KEYS bit is set) then the remote end will
+     * ONLY send key exchange related traffic. In non-blocking mode, there is
+     * a chance to break out of the kex_exchange function with an EAGAIN
+     * status, and never come back to it. If LIBSSH2_STATE_EXCHANGING_KEYS is
+     * active, then we must redirect to the key exchange. However, if
+     * kex_exchange is active (as in it is the one that calls this execution
+     * of packet_read, then don't redirect, as that would be an infinite loop!
+     */
+    if (session->state & LIBSSH2_STATE_EXCHANGING_KEYS &&
+        !(session->state & LIBSSH2_STATE_KEX_ACTIVE)) {
+
+        /* Whoever wants a packet won't get anything until the key re-exchange
+         * is done!
+         */
+        _libssh2_debug(session, LIBSSH2_TRACE_TRANS, "Redirecting into the"
+                       " key re-exchange from _libssh2_packet_read");
+	goto kex_exchange_in_progress;
+    }
+    
+    if (session->packAdd_state == libssh2_NB_state_idle) {
+	rc = _libssh2_transport_read(session);
+	if (rc < 0)
+	    return rc;
+
+	_libssh2_debug(session, LIBSSH2_TRACE_TRANS,
                        "Packet type %d received, length=%d",
-                       (int) msg, (int) datalen);
+                       (int) p->payload[0], (int) p->packet_length);
+	
+	session->packAdd_state = libssh2_NB_state_allocated;
+    }
 
-        session->packAdd_state = libssh2_NB_state_allocated;
-        break;
+    data = p->payload;
+    datalen = p->packet_length;
+    msg = data[0];
+    
+    switch(session->packAdd_state) {
+    case libssh2_NB_state_allocated:
+	goto libssh2_packet_add_jump_allocated;
     case libssh2_NB_state_jump1:
         goto libssh2_packet_add_jump_point1;
     case libssh2_NB_state_jump2:
@@ -443,9 +512,11 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
     case libssh2_NB_state_jump5:
         goto libssh2_packet_add_jump_point5;
     default: /* nothing to do */
+	_libssh2_debug(session, LIBSSH2_TRACE_TRANS, "bad state %d!", session->packAdd_state); 
         break;
     }
 
+libssh2_packet_add_jump_allocated:
     if (session->packAdd_state == libssh2_NB_state_allocated) {
         /* A couple exceptions to the packet adding rule: */
         switch (msg) {
@@ -490,11 +561,9 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
                                message, language);
             }
 
-            LIBSSH2_FREE(session, data);
-            session->socket_state = LIBSSH2_SOCKET_DISCONNECTED;
-            session->packAdd_state = libssh2_NB_state_idle;
-            return _libssh2_error(session, LIBSSH2_ERROR_SOCKET_DISCONNECT,
-                                  "socket disconnect");
+	    return packet_read_error(session, LIBSSH2_ERROR_SOCKET_DISCONNECT,
+				     "socket disconnect");
+
             /*
               byte      SSH_MSG_IGNORE
               string    data
@@ -508,9 +577,9 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
             } else if (session->ssh_msg_ignore) {
                 LIBSSH2_IGNORE(session, "", 0);
             }
-            LIBSSH2_FREE(session, data);
-            session->packAdd_state = libssh2_NB_state_idle;
-            return 0;
+
+	    packet_read_done(session, 1);
+	    return msg;
 
             /*
               byte      SSH_MSG_DEBUG
@@ -547,9 +616,8 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
              */
             _libssh2_debug(session, LIBSSH2_TRACE_TRANS,
                            "Debug Packet: %s", message);
-            LIBSSH2_FREE(session, data);
-            session->packAdd_state = libssh2_NB_state_idle;
-            return 0;
+	    packet_read_done(session, 1);
+            return msg;
 
             /*
               byte      SSH_MSG_GLOBAL_REQUEST
@@ -580,11 +648,12 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
                     rc = _libssh2_transport_send(session, &packet, 1, NULL, 0);
                     if (rc == LIBSSH2_ERROR_EAGAIN)
                         return rc;
+		    /* FIXME! and otherwise, what happens? */
                 }
             }
-            LIBSSH2_FREE(session, data);
-            session->packAdd_state = libssh2_NB_state_idle;
-            return 0;
+
+	    packet_read_done(session, 1);
+	    return msg;
 
             /*
               byte      SSH_MSG_CHANNEL_EXTENDED_DATA
@@ -615,11 +684,8 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
                                             _libssh2_ntohu32(data + 1));
 
             if (!channelp) {
-                _libssh2_error(session, LIBSSH2_ERROR_CHANNEL_UNKNOWN,
-                               "Packet received for unknown channel");
-                LIBSSH2_FREE(session, data);
-                session->packAdd_state = libssh2_NB_state_idle;
-                return 0;
+		return packet_read_error(session, LIBSSH2_ERROR_CHANNEL_UNKNOWN,
+					 "Packet received for unknown channel");
             }
 #ifdef LIBSSH2DEBUG
             {
@@ -639,8 +705,6 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
                  LIBSSH2_CHANNEL_EXTENDED_DATA_IGNORE) &&
                 (msg == SSH_MSG_CHANNEL_EXTENDED_DATA)) {
                 /* Pretend we didn't receive this */
-                LIBSSH2_FREE(session, data);
-
                 _libssh2_debug(session, LIBSSH2_TRACE_CONN,
                                "Ignoring extended data and refunding %d bytes",
                                (int) (datalen - 13));
@@ -658,16 +722,17 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
 
                 session->packAdd_channelp = channelp;
 
-                /* Adjust the window based on the block we just freed */
-              libssh2_packet_add_jump_point1:
+                /* Adjust the window based on the block we just discarded */
+	    libssh2_packet_add_jump_point1:
                 session->packAdd_state = libssh2_NB_state_jump1;
                 rc = _libssh2_channel_receive_window_adjust(session->packAdd_channelp,
                                                             0, 1, NULL);
                 if (rc == LIBSSH2_ERROR_EAGAIN)
                     return rc;
+		/* FIXME: and othewise? what happens? */
 
-                session->packAdd_state = libssh2_NB_state_idle;
-                return 0;
+		packet_read_done(session, 1);
+		return msg;
             }
 
             /*
@@ -676,8 +741,8 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
              */
             if (channelp->remote.packet_size < (datalen - data_head)) {
                 /*
-                 * Spec says we MAY ignore bytes sent beyond
-                 * packet_size
+                 * Spec says we MAY ignore bytes promissed but not
+                 * sent beyond packet_size
                  */
                 _libssh2_error(session,
                                LIBSSH2_ERROR_CHANNEL_PACKET_EXCEEDED,
@@ -686,17 +751,16 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
                 datalen = channelp->remote.packet_size + data_head;
             }
             if (channelp->remote.window_size <= channelp->read_avail) {
+		/* FIXME: that happening would indicate a bug */
+
                 /*
                  * Spec says we MAY ignore bytes sent beyond
                  * window_size
                  */
-                _libssh2_error(session,
-                               LIBSSH2_ERROR_CHANNEL_WINDOW_EXCEEDED,
-                               "The current receive window is full,"
-                               " data ignored");
-                LIBSSH2_FREE(session, data);
-                session->packAdd_state = libssh2_NB_state_idle;
-                return 0;
+		return packet_read_error(session,
+					 LIBSSH2_ERROR_CHANNEL_WINDOW_EXCEEDED,
+					 "The current receive window is full,"
+					 " data ignored");
             }
             /* Reset EOF status */
             channelp->remote.eof = 0;
@@ -745,9 +809,9 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
                                channelp->remote.id);
                 channelp->remote.eof = 1;
             }
-            LIBSSH2_FREE(session, data);
-            session->packAdd_state = libssh2_NB_state_idle;
-            return 0;
+
+	    packet_read_done(session, 1);
+	    return msg;
 
             /*
               byte      SSH_MSG_CHANNEL_REQUEST
@@ -835,9 +899,8 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
                         return rc;
                 }
             }
-            LIBSSH2_FREE(session, data);
-            session->packAdd_state = libssh2_NB_state_idle;
-            return rc;
+
+	    return packet_read_error(session, rc, NULL);
 
             /*
               byte      SSH_MSG_CHANNEL_CLOSE
@@ -849,24 +912,26 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
                 channelp =
                     _libssh2_channel_locate(session,
                                             _libssh2_ntohu32(data + 1));
-            if (!channelp) {
-                /* We may have freed already, just quietly ignore this... */
-                LIBSSH2_FREE(session, data);
-                session->packAdd_state = libssh2_NB_state_idle;
-                return 0;
-            }
-            _libssh2_debug(session, LIBSSH2_TRACE_CONN,
-                           "Close received for channel %lu/%lu",
-                           channelp->local.id,
-                           channelp->remote.id);
+            if (channelp) {
+		_libssh2_debug(session, LIBSSH2_TRACE_CONN,
+			       "Close received for channel %lu/%lu",
+			       channelp->local.id,
+			       channelp->remote.id);
 
-            channelp->remote.close = 1;
-            channelp->remote.eof = 1;
+		channelp->remote.close = 1;
+		channelp->remote.eof = 1;
+	    }
+	    else {
+		/* We may have freed already, just quietly ignore this... */
+		_libssh2_debug(session, LIBSSH2_TRACE_CONN,
+			       "Close received for nonexistent channel %lu",
+			       _libssh2_ntohu32(data + 1));
+	    }
 
-            LIBSSH2_FREE(session, data);
-            session->packAdd_state = libssh2_NB_state_idle;
-            return 0;
+	    packet_read_done(session, 1);
+	    return msg;
 
+	    
             /*
               byte      SSH_MSG_CHANNEL_OPEN
               string    "session"
@@ -910,9 +975,7 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
             if (rc == LIBSSH2_ERROR_EAGAIN)
                 return rc;
 
-            LIBSSH2_FREE(session, data);
-            session->packAdd_state = libssh2_NB_state_idle;
-            return rc;
+	    return packet_read_error(session, rc, NULL);
 
             /*
               byte      SSH_MSG_CHANNEL_WINDOW_ADJUST
@@ -939,9 +1002,10 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
                                    channelp->local.window_size);
                 }
             }
-            LIBSSH2_FREE(session, data);
-            session->packAdd_state = libssh2_NB_state_idle;
-            return 0;
+
+	    packet_read_done(session, 1);
+	    return msg;
+
         default:
             break;
         }
@@ -955,13 +1019,14 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
         if (!packetp) {
             _libssh2_debug(session, LIBSSH2_ERROR_ALLOC,
                            "memory for packet");
-            LIBSSH2_FREE(session, data);
-            session->packAdd_state = libssh2_NB_state_idle;
-            return LIBSSH2_ERROR_ALLOC;
+	    return packet_read_error(session, LIBSSH2_ERROR_ALLOC, NULL);
         }
-        packetp->data = data;
         packetp->data_len = datalen;
         packetp->data_head = data_head;
+
+	/* transfer ownership of the payload */
+        packetp->data = data;
+	packet_read_done(session, 0);
 
         _libssh2_list_add(&session->packets, &packetp->node);
 
@@ -969,32 +1034,15 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
     }
 
     if ((msg == SSH_MSG_KEXINIT &&
-         !(session->state & LIBSSH2_STATE_EXCHANGING_KEYS)) ||
-        (session->packAdd_state == libssh2_NB_state_sent2)) {
-        if (session->packAdd_state == libssh2_NB_state_sent1) {
+         !(session->state & LIBSSH2_STATE_EXCHANGING_KEYS))) {
+	if (session->packAdd_state == libssh2_NB_state_sent1) {
             /*
              * Remote wants new keys
              * Well, it's already in the brigade,
              * let's just call back into ourselves
              */
             _libssh2_debug(session, LIBSSH2_TRACE_TRANS, "Renegotiating Keys");
-
-            session->packAdd_state = libssh2_NB_state_sent2;
         }
-
-        /*
-         * The KEXINIT message has been added to the queue.  The packAdd and
-         * readPack states need to be reset because _libssh2_kex_exchange
-         * (eventually) calls upon _libssh2_transport_read to read the rest of
-         * the key exchange conversation.
-         */
-        session->readPack_state = libssh2_NB_state_idle;
-        if (session->packet.payload_length) {
-            LIBSSH2_FREE(session, session->packet.payload);
-            session->packet.payload = 0;
-            session->packet.payload_length = 0;
-        }
-        session->packAdd_state = libssh2_NB_state_idle;
 
         memset(&session->startup_key_state, 0, sizeof(key_exchange_state_t));
 
@@ -1002,13 +1050,30 @@ _libssh2_packet_add(LIBSSH2_SESSION * session, unsigned char *data,
          * If there was a key reexchange failure, let's just hope we didn't
          * send NEWKEYS yet, otherwise remote will drop us like a rock
          */
+
+        session->packAdd_state = libssh2_NB_state_idle;
+    kex_exchange_in_progress:
         rc = _libssh2_kex_exchange(session, 1, &session->startup_key_state);
-        if (rc == LIBSSH2_ERROR_EAGAIN)
-            return rc;
+        return (rc < 0) ? rc : SSH_MSG_KEXINIT;
     }
 
     session->packAdd_state = libssh2_NB_state_idle;
-    return 0;
+    return msg;
+}
+
+/*
+ * _libssh2_packet_drain
+ *
+ * Reads as many packets as possible from the network without blocking.
+ * Returns error code (usually LIBSSH2_ERROR_EAGAIN).
+ */
+
+int _libssh2_packet_drain(LIBSSH2_SESSION *session) {
+    int rc;
+    do {
+        rc = _libssh2_packet_read(session);
+    } while (rc >= 0);
+    return rc;
 }
 
 /*
@@ -1070,7 +1135,7 @@ _libssh2_packet_askv(LIBSSH2_SESSION * session,
 /*
  * _libssh2_packet_require
  *
- * Loops _libssh2_transport_read() until the packet requested is available
+ * Loops _libssh2_packet_read() until the packet requested is available
  * or an error happens.
  *
  * Returns negative on error or 0 when it has taken care of the requested
@@ -1091,7 +1156,7 @@ _libssh2_packet_require(LIBSSH2_SESSION * session, unsigned char packet_type,
 /*
  * _libssh2_packet_burn
  *
- * Loops _libssh2_transport_read() until any packet is available and promptly
+ * Loops _libssh2_packet_read() until any packet is available and promptly
  * discards it. Returns 0 on success, error otherwise.
  * Used during KEX exchange to discard badly guessed KEX_INIT packets.
  */
@@ -1116,7 +1181,7 @@ _libssh2_packet_burn(LIBSSH2_SESSION * session)
 /*
  * _libssh2_packet_requirev
  *
- * Loops _libssh2_transport_read() until one of a list of packet types
+ * Loops _libssh2_packet_read() until one of a list of packet types
  * requested is available or an error happens.
  * Returns zero on success or the error code otherwise.
  * If packet_types is NULL, any packet type is accepted.
@@ -1137,7 +1202,7 @@ _libssh2_packet_requirev(LIBSSH2_SESSION *session,
     }
 
     while (1) {
-        int ret = _libssh2_transport_read(session);
+        int ret = _libssh2_packet_read(session);
         if (ret < 0)
             return ret;
 

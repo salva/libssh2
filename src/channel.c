@@ -711,7 +711,7 @@ libssh2_channel_forward_cancel(LIBSSH2_LISTENER *listener)
 static LIBSSH2_CHANNEL *
 channel_forward_accept(LIBSSH2_LISTENER *listener)
 {
-    int rc = _libssh2_transport_read_drain(listener->session);
+    int rc = _libssh2_packet_drain(listener->session);
 
     if (_libssh2_list_first(&listener->queue)) {
         LIBSSH2_CHANNEL *channel = _libssh2_list_first(&listener->queue);
@@ -1757,7 +1757,7 @@ ssize_t _libssh2_channel_read(LIBSSH2_CHANNEL *channel, int stream_id,
 
     /* Process all pending incoming packets. Tests prove that this way
        produces faster transfers. */
-    rc = _libssh2_transport_read_drain(session);
+    rc = _libssh2_packet_drain(session);
 
     /* Even if we get a fatal error, there may be data queued on the
      * packet list, so we look for it before checking rc for errors */
@@ -1916,7 +1916,7 @@ _libssh2_channel_write(LIBSSH2_CHANNEL *channel, int stream_id,
 
         /* drain the incoming flow first, mostly to make sure we get all
          * pending window adjust packets */
-        rc = _libssh2_transport_read_drain(session);
+        rc = _libssh2_packet_drain(session);
 
         if(rc != LIBSSH2_ERROR_EAGAIN) {
             return _libssh2_error(channel->session, rc,
@@ -2125,7 +2125,7 @@ static int channel_wait_eof(LIBSSH2_CHANNEL *channel)
         channel->wait_eof_state = libssh2_NB_state_created;
     }
 
-    rc = _libssh2_transport_read_drain(session);
+    rc = _libssh2_packet_drain(session);
 
     if (channel->remote.eof) {
         rc = 0;
@@ -2142,7 +2142,7 @@ static int channel_wait_eof(LIBSSH2_CHANNEL *channel)
                 return LIBSSH2_ERROR_EAGAIN;
         }
         else
-            _libssh2_error(session, rc, "_libssh2_transport_read_drain() bailed out!");
+            _libssh2_error(session, rc, "_libssh2_packet_drain() bailed out!");
     }
 
     channel->wait_eof_state = libssh2_NB_state_idle;
@@ -2225,7 +2225,7 @@ int _libssh2_channel_close(LIBSSH2_CHANNEL * channel)
         /* We must wait for the remote SSH_MSG_CHANNEL_CLOSE message */
 
         while (!channel->remote.close && rc >= 0)
-            rc = _libssh2_transport_read(session);
+            rc = _libssh2_packet_read(session);
     }
 
     /* FIXME: errors result in local.close being set -- salva 2016/11/09 */
@@ -2293,7 +2293,7 @@ static int channel_wait_closed(LIBSSH2_CHANNEL *channel)
      */
 
     while (!channel->remote.close) {
-        int rc = _libssh2_transport_read(session);
+        int rc = _libssh2_packet_read(session);
         if (rc < 0)
             return rc;
     }

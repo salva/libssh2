@@ -1671,7 +1671,7 @@ libssh2_poll(LIBSSH2_POLLFD * fds, unsigned int nfds, long timeout)
                 case LIBSSH2_POLLFD_CHANNEL:
                     if (sockets[i].events & POLLIN) {
                         /* Spin session until no data available */
-                        _libssh2_transport_read_drain(fds[i].fd.channel->session);
+                        _libssh2_packet_drain(fds[i].fd.channel->session);
                     }
                     if (sockets[i].revents & POLLHUP) {
                         fds[i].revents |=
@@ -1683,7 +1683,7 @@ libssh2_poll(LIBSSH2_POLLFD * fds, unsigned int nfds, long timeout)
                 case LIBSSH2_POLLFD_LISTENER:
                     if (sockets[i].events & POLLIN) {
                         /* Spin session until no data available */
-                        _libssh2_transport_read_drain(fds[i].fd.listener->session);
+                        _libssh2_packet_drain(fds[i].fd.listener->session);
                     }
                     if (sockets[i].revents & POLLHUP) {
                         fds[i].revents |=
@@ -1735,7 +1735,7 @@ libssh2_poll(LIBSSH2_POLLFD * fds, unsigned int nfds, long timeout)
                 case LIBSSH2_POLLFD_CHANNEL:
                     if (FD_ISSET(fds[i].fd.channel->session->socket_fd, &rfds)) {
                         /* Spin session until no data available */
-                        _libssh2_transport_read_drain(fds[i].fd.channel->session);
+                        _libssh2_packet_drain(fds[i].fd.channel->session);
                     }
                     break;
 
@@ -1743,7 +1743,7 @@ libssh2_poll(LIBSSH2_POLLFD * fds, unsigned int nfds, long timeout)
                     if (FD_ISSET
                         (fds[i].fd.listener->session->socket_fd, &rfds)) {
                         /* Spin session until no data available */
-                        _libssh2_transport_read_drain(fds[i].fd.listener->session);
+                        _libssh2_packet_drain(fds[i].fd.listener->session);
                     }
                     break;
                 }

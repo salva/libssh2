@@ -221,6 +221,7 @@ refill_read_buffer(LIBSSH2_SESSION * session, int required_len) {
  *
  * DOES NOT call _libssh2_error() for ANY error case.
  */
+
 int _libssh2_transport_read(LIBSSH2_SESSION * session)
 {
     int rc;
@@ -249,24 +250,10 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
      * of packet_read, then don't redirect, as that would be an infinite loop!
      */
 
-    if (session->state & LIBSSH2_STATE_EXCHANGING_KEYS &&
-        !(session->state & LIBSSH2_STATE_KEX_ACTIVE)) {
-
-        /* Whoever wants a packet won't get anything until the key re-exchange
-         * is done!
-         */
-        _libssh2_debug(session, LIBSSH2_TRACE_TRANS, "Redirecting into the"
-                       " key re-exchange from _libssh2_transport_read");
-        rc = _libssh2_kex_exchange(session, 1, &session->startup_key_state);
-        if (rc)
-            return rc;
-    }
-
     if (session->socket_state == LIBSSH2_SOCKET_DISCONNECTED)
         return LIBSSH2_ERROR_SOCKET_DISCONNECT;
 
-    switch(session->readPack_state) {
-    case libssh2_NB_state_idle:
+    do {
         if (session->state & LIBSSH2_STATE_NEWKEYS) {
             p->packet_encrypted = 1;
             blocksize = session->remote.crypt->blocksize;
@@ -525,58 +512,12 @@ int _libssh2_transport_read(LIBSSH2_SESSION * session)
             p->packet_length = data_len;
         }
 
-        p->packet_type = p->payload[0];
-
         debugdump(session, "libssh2_transport_read() plain",
                   p->payload, p->packet_length);
 
-    case libssh2_NB_state_jump1:
-        session->readPack_state = libssh2_NB_state_idle;
-        rc = _libssh2_packet_add(session, p->payload,
-                                 p->packet_length);
-	if (rc == LIBSSH2_ERROR_EAGAIN) {
-	    if (session->packAdd_state == libssh2_NB_state_idle) {
-		/* 
-		 * if libssh2_packet_add returns LIBSSH2_ERROR_EAGAIN and the
-		 * packAdd_state is idle, then the packet has been added to the
-		 * brigade, but some immediate action that was taken based on the
-		 * packet type (such as key re-exchange) is not yet complete. Clear
-		 * the way for a new packet to be read in.
-		 */
-		rc = LIBSSH2_ERROR_NONE;
-	    }
-	    else {
-		session->readPack_state = libssh2_NB_state_jump1;
-		return rc;
-	    }
-	}
 
-        p->payload = NULL; /* payload has been eaten by _libssh2_packet_add */
-        p->payload_length = 0; /* no packet buffer available */
-        return (rc < 0) ? rc : p->packet_type;
-
-    default:
-        _libssh2_debug(session, LIBSSH2_TRACE_TRANS,
-                       "Internal error, state %d not handled",
-                       session->readPack_state);
-        break;
-    }
-    return LIBSSH2_ERROR_SOCKET_RECV; /* we never reach this point */
-}
-
-/*
- * _libssh2_transport_read_drain
- *
- * Reads as many packets as possible from the network without blocking.
- * Returns error code (usually LIBSSH2_ERROR_EAGAIN).
- */
-
-int _libssh2_transport_read_drain(LIBSSH2_SESSION *session) {
-    int rc;
-    do {
-        rc = _libssh2_transport_read(session);
-    } while (rc >= 0);
-    return rc;
+    } while (0);
+    return LIBSSH2_ERROR_NONE;
 }
 
 /*
@@ -676,7 +617,7 @@ int _libssh2_transport_send(LIBSSH2_SESSION *session,
      * exchange, we must complete that key exchange before continuing to write
      * further data.
      *
-     * See the similar block in _libssh2_transport_read for more details.
+     * See the similar block in _libssh2_packet_read for more details.
      */
     if (session->state & LIBSSH2_STATE_EXCHANGING_KEYS &&
         !(session->state & LIBSSH2_STATE_KEX_ACTIVE)) {

@@ -103,7 +103,7 @@ int _libssh2_keepalive_send (LIBSSH2_SESSION *session,
         return rc;
 
     /* We set the state even when an error happens. It is probably
-       useless as errors from _libssh2_transport_read are usually
+       useless as errors from _libssh2_packet_read are usually
        final, but hey, it is a harmless operation anyway! */
     session->keepalive_last_sent = (now ? now : time(NULL));
     session->keepalive_data = NULL;
