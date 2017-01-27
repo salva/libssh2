@@ -487,7 +487,7 @@ _libssh2_packet_read(LIBSSH2_SESSION * session)
     _libssh2_debug(session, LIBSSH2_TRACE_TRANS,
 		   "entering _libssh2_packet_read, state: %d, payload: %p, length: %d",
 		   session->packAdd_state, p->payload, p->payload_length);
-    
+
     /*
      * All channels, systems, subsystems, etc eventually make it down here
      * when looking for more incoming data. If a key exchange is going on
@@ -509,7 +509,7 @@ _libssh2_packet_read(LIBSSH2_SESSION * session)
                        " key re-exchange from _libssh2_packet_read");
 	goto kex_exchange_in_progress;
     }
-    
+
     if (session->packAdd_state == libssh2_NB_state_idle) {
 	rc = _libssh2_transport_read(session);
 	if (rc < 0)
@@ -518,17 +518,15 @@ _libssh2_packet_read(LIBSSH2_SESSION * session)
 	_libssh2_debug(session, LIBSSH2_TRACE_TRANS,
                        "Packet type %d received, length=%d",
                        (int) p->payload[0], (int) p->packet_length);
-	
-	session->packAdd_state = libssh2_NB_state_allocated;
     }
 
     data = p->payload;
     datalen = p->packet_length;
     msg = data[0];
-    
+
     switch(session->packAdd_state) {
-    case libssh2_NB_state_allocated:
-	goto libssh2_packet_add_jump_allocated;
+    case libssh2_NB_state_idle:
+	goto libssh2_packet_add_jump_idle;
     case libssh2_NB_state_jump1:
         goto libssh2_packet_add_jump_point1;
     case libssh2_NB_state_jump2:
@@ -540,11 +538,12 @@ _libssh2_packet_read(LIBSSH2_SESSION * session)
     case libssh2_NB_state_jump5:
         goto libssh2_packet_add_jump_point5;
     default: /* nothing to do */
-	_libssh2_debug(session, LIBSSH2_TRACE_TRANS, "bad state %d!", session->packAdd_state); 
-        break;
+	_libssh2_debug(session, LIBSSH2_TRACE_TRANS, "bad state %d!", session->packAdd_state);
+	return packet_read_error(session, LIBSSH2_ERROR_INTERNAL_ERROR,
+				 "bad state in _libssh2_packet_read")
     }
 
-libssh2_packet_add_jump_allocated:
+libssh2_packet_add_jump_idle:
     switch (msg) {
     case SSH_MSG_DISCONNECT:
 	/*
