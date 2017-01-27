@@ -414,7 +414,7 @@ packet_read_done(LIBSSH2_SESSION *session, int free_payload) {
     }
     p->payload_length = 0;
     p->packet_length = 0;
-    session->packAdd_state = libssh2_NB_state_idle;
+    session->packRead_state = libssh2_NB_state_idle;
 }
 
 static int
@@ -486,7 +486,7 @@ _libssh2_packet_read(LIBSSH2_SESSION * session)
 
     _libssh2_debug(session, LIBSSH2_TRACE_TRANS,
 		   "entering _libssh2_packet_read, state: %d, payload: %p, length: %d",
-		   session->packAdd_state, p->payload, p->payload_length);
+		   session->packRead_state, p->payload, p->payload_length);
 
     /*
      * All channels, systems, subsystems, etc eventually make it down here
@@ -510,7 +510,7 @@ _libssh2_packet_read(LIBSSH2_SESSION * session)
 	goto kex_exchange_in_progress;
     }
 
-    if (session->packAdd_state == libssh2_NB_state_idle) {
+    if (session->packRead_state == libssh2_NB_state_idle) {
 	rc = _libssh2_transport_read(session);
 	if (rc < 0)
 	    return rc;
@@ -524,26 +524,26 @@ _libssh2_packet_read(LIBSSH2_SESSION * session)
     datalen = p->packet_length;
     msg = data[0];
 
-    switch(session->packAdd_state) {
+    switch(session->packRead_state) {
     case libssh2_NB_state_idle:
-	goto libssh2_packet_add_jump_idle;
+	goto libssh2_packet_read_jump_idle;
     case libssh2_NB_state_jump1:
-        goto libssh2_packet_add_jump_point1;
+        goto libssh2_packet_read_jump_point1;
     case libssh2_NB_state_jump2:
-        goto libssh2_packet_add_jump_point2;
+        goto libssh2_packet_read_jump_point2;
     case libssh2_NB_state_jump3:
-        goto libssh2_packet_add_jump_point3;
+        goto libssh2_packet_read_jump_point3;
     case libssh2_NB_state_jump4:
-        goto libssh2_packet_add_jump_point4;
+        goto libssh2_packet_read_jump_point4;
     case libssh2_NB_state_jump5:
-        goto libssh2_packet_add_jump_point5;
+        goto libssh2_packet_read_jump_point5;
     default: /* nothing to do */
-	_libssh2_debug(session, LIBSSH2_TRACE_TRANS, "bad state %d!", session->packAdd_state);
+	_libssh2_debug(session, LIBSSH2_TRACE_TRANS, "bad state %d!", session->packRead_state);
 	return packet_read_error(session, LIBSSH2_ERROR_INTERNAL_ERROR,
-				 "bad state in _libssh2_packet_read")
+				 "bad state in _libssh2_packet_read");
     }
 
-libssh2_packet_add_jump_idle:
+libssh2_packet_read_jump_idle:
     switch (msg) {
     case SSH_MSG_DISCONNECT:
 	/*
@@ -662,8 +662,8 @@ libssh2_packet_add_jump_idle:
 	    if (want_reply) {
 		static const unsigned char packet =
 		    SSH_MSG_REQUEST_FAILURE;
-	    libssh2_packet_add_jump_point5:
-		session->packAdd_state = libssh2_NB_state_jump5;
+	    libssh2_packet_read_jump_point5:
+		session->packRead_state = libssh2_NB_state_jump5;
 		rc = _libssh2_transport_send(session, &packet, 1, NULL, 0);
 		if (rc == LIBSSH2_ERROR_EAGAIN)
 		    return rc;
@@ -709,7 +709,7 @@ libssh2_packet_add_jump_idle:
 		stream_id = _libssh2_ntohu32(data + 5);
 
 	    _libssh2_debug(session, LIBSSH2_TRACE_CONN,
-			   "%d bytes packet_add() for %lu/%lu/%lu",
+			   "%d bytes packet_read() for %lu/%lu/%lu",
 			   (int) (datalen - data_head),
 			   channelp->local.id,
 			   channelp->remote.id,
@@ -735,12 +735,12 @@ libssh2_packet_add_jump_idle:
 			   channelp->remote.window_size,
 			   channelp->read_avail);
 
-	    session->packAdd_channelp = channelp;
+	    session->packRead_channelp = channelp;
 
 	    /* Adjust the window based on the block we just discarded */
-	libssh2_packet_add_jump_point1:
-	    session->packAdd_state = libssh2_NB_state_jump1;
-	    rc = _libssh2_channel_receive_window_adjust(session->packAdd_channelp,
+	libssh2_packet_read_jump_point1:
+	    session->packRead_state = libssh2_NB_state_jump1;
+	    rc = _libssh2_channel_receive_window_adjust(session->packRead_channelp,
 							0, 1, NULL);
 	    if (rc == LIBSSH2_ERROR_EAGAIN)
 		return rc;
@@ -901,8 +901,8 @@ libssh2_packet_add_jump_idle:
 
 	    if (want_reply) {
 		unsigned char packet[5];
-	    libssh2_packet_add_jump_point4:
-		session->packAdd_state = libssh2_NB_state_jump4;
+	    libssh2_packet_read_jump_point4:
+		session->packRead_state = libssh2_NB_state_jump4;
 		packet[0] = SSH_MSG_CHANNEL_FAILURE;
 		memcpy(&packet[1], data+1, 4);
 		rc = _libssh2_transport_send(session, packet, 5, NULL, 0);
@@ -958,26 +958,26 @@ libssh2_packet_add_jump_idle:
 			 sizeof("forwarded-tcpip") - 1) == 0)) {
 
 	    /* init the state struct */
-	    memset(&session->packAdd_Qlstn_state, 0,
-		   sizeof(session->packAdd_Qlstn_state));
+	    memset(&session->packRead_Qlstn_state, 0,
+		   sizeof(session->packRead_Qlstn_state));
 
-	libssh2_packet_add_jump_point2:
-	    session->packAdd_state = libssh2_NB_state_jump2;
+	libssh2_packet_read_jump_point2:
+	    session->packRead_state = libssh2_NB_state_jump2;
 	    rc = packet_queue_listener(session, data, datalen,
-				       &session->packAdd_Qlstn_state);
+				       &session->packRead_Qlstn_state);
 	}
 	else if ((datalen >= (sizeof("x11") + 4)) &&
 		 ((sizeof("x11") - 1) == _libssh2_ntohu32(data + 1)) &&
 		 (memcmp(data + 5, "x11", sizeof("x11") - 1) == 0)) {
 
 	    /* init the state struct */
-	    memset(&session->packAdd_x11open_state, 0,
-		   sizeof(session->packAdd_x11open_state));
+	    memset(&session->packRead_x11open_state, 0,
+		   sizeof(session->packRead_x11open_state));
 
-	libssh2_packet_add_jump_point3:
-	    session->packAdd_state = libssh2_NB_state_jump3;
+	libssh2_packet_read_jump_point3:
+	    session->packRead_state = libssh2_NB_state_jump3;
 	    rc = packet_x11_open(session, data, datalen,
-				 &session->packAdd_x11open_state);
+				 &session->packRead_x11open_state);
 	}
 	if (rc == LIBSSH2_ERROR_EAGAIN)
 	    return rc;

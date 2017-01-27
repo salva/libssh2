@@ -729,11 +729,11 @@ struct _LIBSSH2_SESSION
     size_t pkeyInit_buffer_sent; /* how much of buffer that has been sent */
 
     /* State variables used in libssh2_packet_add() */
-    libssh2_nonblocking_states packAdd_state;
-    LIBSSH2_CHANNEL *packAdd_channelp; /* keeper of the channel during EAGAIN
+    libssh2_nonblocking_states packRead_state;
+    LIBSSH2_CHANNEL *packRead_channelp; /* keeper of the channel during EAGAIN
                                           states */
-    packet_queue_listener_state_t packAdd_Qlstn_state;
-    packet_x11_open_state_t packAdd_x11open_state;
+    packet_queue_listener_state_t packRead_Qlstn_state;
+    packet_x11_open_state_t packRead_x11open_state;
 
     /* State variables used in libssh2_sftp_init() */
     libssh2_nonblocking_states sftpInit_state;
